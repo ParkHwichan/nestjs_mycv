@@ -1,0 +1,27 @@
+POST http://localhost:3000/auth/signup
+Content-Type: application/json
+
+{
+    "email": "test@test.com",
+    "password": "123456"
+}
+
+### 유저 조회
+GET http://localhost:3000/auth/1
+
+
+### 유저 목록 조회
+GET http://localhost:3000/auth?email=test@test.com
+
+### 유저 삭제
+DELETE http://localhost:3000/auth/1
+
+
+### 유저 업데이트
+PATCH http://localhost:3000/auth/2
+Content-Type: application/json
+
+{
+    "email": "test@test.com",
+    "password": "1234256"
+}
