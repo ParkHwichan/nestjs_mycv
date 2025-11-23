@@ -2,12 +2,22 @@ POST http://localhost:3000/auth/signup
 Content-Type: application/json
 
 {
-    "email": "test@test.com",
+    "email": "test2@test.com",
     "password": "123456"
 }
 
+### 로그인
+POST http://localhost:3000/auth/signin
+Content-Type: application/json
+
+{
+    "email": "test2@test.com",
+    "password": "123456"
+}
+
+
 ### 유저 조회
-GET http://localhost:3000/auth/1
+GET http://localhost:3000/auth/2
 
 
 ### 유저 목록 조회
