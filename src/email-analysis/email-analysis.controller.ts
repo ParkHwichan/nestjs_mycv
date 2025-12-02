@@ -2,6 +2,7 @@ import { Controller, Get, Post, Delete, Param, Query, Session } from '@nestjs/co
 import { ApiTags, ApiOperation, ApiQuery, ApiParam, ApiResponse } from '@nestjs/swagger';
 import { EmailAnalysisService } from './email-analysis.service';
 import { EmailAnalysisScheduler } from './email-analysis.scheduler';
+import { PaymentReportListResponseDto } from './dto/payment-report.dto';
 
 @ApiTags('email-analysis')
 @Controller('email-analysis')
@@ -32,7 +33,7 @@ export class EmailAnalysisController {
 
       return { 
         success: true, 
-        isPayment: !!result.paymentReport,
+        isPayment: result.paymentReport?.isPayment ?? false,
         data: result.paymentReport ? {
           id: result.paymentReport.id,
           emailId: result.email.id,
@@ -43,6 +44,7 @@ export class EmailAnalysisController {
           paymentDate: result.paymentReport.paymentDate,
           cardType: result.paymentReport.cardType,
           paymentType: result.paymentReport.paymentType,
+          category: result.paymentReport.category,
           summary: result.paymentReport.summary,
         } : null,
       };
@@ -80,21 +82,20 @@ export class EmailAnalysisController {
   }
 
   @Get('payments')
-  @ApiOperation({ summary: '결제 리포트 목록 조회', description: '페이지네이션과 날짜 필터를 지원하는 결제 리포트 목록' })
-  @ApiQuery({ name: 'page', required: false, description: '페이지 번호', example: 1 })
-  @ApiQuery({ name: 'limit', required: false, description: '페이지당 개수 (최대 100)', example: 20 })
-  @ApiQuery({ name: 'year', required: false, description: '연도 필터', example: 2024 })
-  @ApiQuery({ name: 'month', required: false, description: '월 필터 (1-12)', example: 12 })
-  @ApiQuery({ name: 'day', required: false, description: '일 필터 (1-31)', example: 25 })
-  @ApiQuery({ name: 'startDate', required: false, description: '시작일 (YYYY-MM-DD)', example: '2024-01-01' })
-  @ApiQuery({ name: 'endDate', required: false, description: '종료일 (YYYY-MM-DD)', example: '2024-12-31' })
+  @ApiOperation({ summary: '결제 리포트 목록 조회', description: '페이지네이션과 날짜 필터를 지원하는 결제 리포트 목록. body, htmlBody, attachments 포함.' })
+  @ApiQuery({ name: 'page', required: false, description: '페이지 번호 (기본값: 1)' })
+  @ApiQuery({ name: 'limit', required: false, description: '페이지당 개수 (기본값: 20, 최대: 100)' })
+  @ApiQuery({ name: 'search', required: false, description: '검색어 (searchText에서 검색)' })
+  @ApiQuery({ name: 'category', required: false, description: '카테고리 필터', enum: ['transport', 'living', 'hobby', 'other'] })
+  @ApiQuery({ name: 'startDate', required: false, description: '시작일 (YYYY-MM-DD)' })
+  @ApiQuery({ name: 'endDate', required: false, description: '종료일 (YYYY-MM-DD)' })
+  @ApiResponse({ status: 200, description: '성공', type: PaymentReportListResponseDto })
   async getPaymentReports(
     @Session() session: any,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
-    @Query('year') year?: string,
-    @Query('month') month?: string,
-    @Query('day') day?: string,
+    @Query('search') search?: string,
+    @Query('category') category?: string,
     @Query('startDate') startDate?: string,
     @Query('endDate') endDate?: string,
   ) {
@@ -106,9 +107,8 @@ export class EmailAnalysisController {
       const result = await this.emailAnalysisService.getUserPaymentReportsPaginated(session.userId, {
         page: page ? parseInt(page) : 1,
         limit: limit ? parseInt(limit) : 20,
-        year: year ? parseInt(year) : undefined,
-        month: month ? parseInt(month) : undefined,
-        day: day ? parseInt(day) : undefined,
+        search,
+        category,
         startDate,
         endDate,
       });
@@ -124,18 +124,47 @@ export class EmailAnalysisController {
         data: result.data.map(r => ({
           id: r.id,
           emailId: r.emailId,
+          messageId: r.email?.messageId,
+          gmailUrl: r.email?.messageId ? `https://mail.google.com/mail/u/0/#inbox/${r.email.messageId}` : null,
+          isPayment: r.isPayment,
           subject: r.email?.subject,
           from: r.email?.from,
+          body: r.email?.body || r.email?.snippet,
+          htmlBody: r.email?.htmlBody,
+          attachments: r.email?.attachments?.map(att => ({
+            id: att.id,
+            filename: att.filename,
+            mimeType: att.mimeType,
+            size: att.size,
+            isInline: att.isInline,
+            url: `/google/attachments/${att.id}`,
+          })) || [],
           amount: r.amount,
           currency: r.currency,
           merchant: r.merchant,
           paymentDate: r.paymentDate,
           cardType: r.cardType,
           paymentType: r.paymentType,
+          category: r.category,
           summary: r.summary,
           createdAt: r.createdAt,
         })),
       };
+    } catch (err) {
+      return { success: false, message: err.message };
+    }
+  }
+
+  @Delete('reports')
+  @ApiOperation({ summary: '분석 결과 삭제 (재분석용)', description: '내 분석 결과를 모두 삭제하여 재분석 가능하게 함' })
+  async deleteMyReports(@Session() session: any) {
+    if (!session.userId) {
+      return { success: false, message: 'Not logged in' };
+    }
+
+    try {
+      const deleted = await this.emailAnalysisService.deleteUserReports(session.userId);
+      return { success: true, deleted };
     } catch (err) {
       return { success: false, message: err.message };
     }
@@ -259,6 +288,7 @@ export class EmailAnalysisController {
           paymentDate: report.paymentDate,
           cardType: report.cardType,
           paymentType: report.paymentType,
+          category: report.category,
           summary: report.summary,
           rawData: report.rawData,
           createdAt: report.createdAt,

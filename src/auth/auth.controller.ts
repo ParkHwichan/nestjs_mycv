@@ -120,4 +120,74 @@ export class AuthController {
     session.user = null;
     res.redirect('/');
   }
+
+  @Get('dev-login')
+  @ApiOperation({ summary: '[개발용] 테스트 로그인', description: 'DB에 있는 사용자로 바로 로그인 (개발 환경 전용)' })
+  @ApiQuery({ name: 'userId', required: false, description: '로그인할 사용자 ID (생략시 첫번째 사용자)', example: 1 })
+  async devLogin(
+    @Session() session: any,
+    @Query('userId') userId?: string,
+  ) {
+    // 프로덕션에서는 비활성화
+    if (process.env.NODE_ENV === 'production') {
+      return { success: false, message: 'Not available in production' };
+    }
+
+    try {
+      let user;
+      
+      if (userId) {
+        user = await this.authService.getUserById(parseInt(userId));
+      } else {
+        // userId가 없으면 첫번째 사용자 찾기
+        const users = await this.authService.getAllUsersWithGoogleToken();
+        if (users.length > 0) {
+          user = await this.authService.getUserById(users[0].id);
+        }
+      }
+
+      if (!user) {
+        return { success: false, message: 'No user found in DB' };
+      }
+
+      // 세션에 사용자 정보 저장
+      session.userId = user.id;
+      session.user = {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        picture: user.picture,
+      };
+
+      console.log('[Auth] Dev login:', user.email);
+
+      return {
+        success: true,
+        message: `Logged in as ${user.email}`,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+        },
+      };
+    } catch (err) {
+      return { success: false, message: err.message };
+    }
+  }
+
+  @Get('dev-users')
+  @ApiOperation({ summary: '[개발용] 사용자 목록', description: 'DB에 있는 사용자 목록 조회 (개발 환경 전용)' })
+  async devUsers() {
+    // 프로덕션에서는 비활성화
+    if (process.env.NODE_ENV === 'production') {
+      return { success: false, message: 'Not available in production' };
+    }
+
+    try {
+      const users = await this.authService.getAllUsersWithGoogleToken();
+      return { success: true, users };
+    } catch (err) {
+      return { success: false, message: err.message };
+    }
+  }
 }

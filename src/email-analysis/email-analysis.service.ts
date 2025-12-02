@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import imageSize from 'image-size';
 import { OpenaiService, FileData } from '../openai/openai.service';
 import { Email } from '../google/entities/email.entity';
 import { EmailAttachment } from '../google/entities/email-attachment.entity';
@@ -21,10 +22,10 @@ export class EmailAnalysisService {
   }
 
   /**
-   * 단일 이메일 분석 → 결제 관련이면 PaymentReport 생성
+   * 단일 이메일 분석 → PaymentReport 생성 (결제 여부 관계없이)
    * @param force - true면 이미 분석된 이메일도 다시 분석
    */
-  async analyzeEmail(emailId: number, force = false): Promise<{ email: Email; paymentReport?: PaymentReport }> {
+  async analyzeEmail(emailId: number, force = false): Promise<{ email: Email; paymentReport: PaymentReport }> {
     const email = await this.emailRepo.findOne({ 
       where: { id: emailId },
       relations: ['paymentReport'],
@@ -35,13 +36,13 @@ export class EmailAnalysisService {
     }
 
     // 이미 분석된 경우 기존 결과 반환 (force가 아닐 때)
-    if (!force && email.analyzedAt) {
-      console.log(`[Payment Analysis] Already analyzed: ${emailId}`);
+    if (!force && email.paymentReport) {
+      console.log(`[Email Analysis] Already analyzed: ${emailId}`);
       return { email, paymentReport: email.paymentReport };
     }
 
-    // 파일 수집: HTML 이미지 URL + 첨부파일 (이미지 + PDF)
-    const files = await this.collectFiles(emailId, email.htmlBody, 5);
+    // 파일 수집: HTML 이미지 URL + 첨부파일 (이미지 + PDF, 200x200 이상만)
+    const files = await this.collectFiles(emailId, email.htmlBody);
 
     // GPT로 이메일 분석 (이미지/PDF 포함)
     const analysis = await this.openaiService.analyzePaymentEmail({
@@ -52,37 +53,40 @@ export class EmailAnalysisService {
       files,
     });
 
-    // 분석 완료 시각 기록 (결제 여부 관계없이)
-    email.analyzedAt = new Date();
-    await this.emailRepo.save(email);
-
-    // 결제 관련 이메일인 경우에만 PaymentReport 생성
-    if (analysis.isPayment) {
-      // 기존 리포트가 있으면 삭제 (force 재분석 시)
-      if (email.paymentReport) {
-        await this.paymentReportRepo.remove(email.paymentReport);
-      }
-
-      const paymentReport = this.paymentReportRepo.create({
-        emailId: email.id,
-        amount: analysis.amount,
-        currency: analysis.currency,
-        merchant: analysis.merchant,
-        paymentDate: analysis.paymentDate ? new Date(analysis.paymentDate) : undefined,
-        cardType: analysis.cardType,
-        paymentType: analysis.paymentType,
-        summary: analysis.summary,
-        rawData: analysis,
-      });
-
-      await this.paymentReportRepo.save(paymentReport);
-      console.log(`[Payment Analysis] Created report for email ${emailId}: ${analysis.merchant} - ${analysis.amount} ${analysis.currency || ''}`);
-      
-      return { email, paymentReport };
+    // 기존 리포트가 있으면 삭제 (force 재분석 시)
+    if (email.paymentReport) {
+      await this.paymentReportRepo.remove(email.paymentReport);
     }
 
-    console.log(`[Payment Analysis] Not a payment email: ${emailId}`);
-    return { email };
+    // PaymentReport 생성 (결제 여부 관계없이)
+    // paymentDate가 없으면 이메일 수신 시점 사용
+    const paymentDate = analysis.isPayment 
+      ? (analysis.paymentDate ? new Date(analysis.paymentDate) : email.receivedAt)
+      : undefined;
+
+    const paymentReport = this.paymentReportRepo.create({
+      emailId: email.id,
+      isPayment: analysis.isPayment,
+      amount: analysis.isPayment ? analysis.amount : undefined,
+      currency: analysis.isPayment ? analysis.currency : undefined,
+      merchant: analysis.isPayment ? analysis.merchant : undefined,
+      paymentDate,
+      cardType: analysis.isPayment ? analysis.cardType : undefined,
+      paymentType: analysis.isPayment ? analysis.paymentType : undefined,
+      category: analysis.isPayment ? analysis.category : undefined,
+      summary: analysis.summary,
+      rawData: analysis,
+    });
+
+    await this.paymentReportRepo.save(paymentReport);
+    
+    if (analysis.isPayment) {
+      console.log(`[Email Analysis] Payment: ${emailId} - ${analysis.merchant} ${analysis.amount} ${analysis.currency || ''} [${analysis.category || 'other'}]`);
+    } else {
+      console.log(`[Email Analysis] Not payment: ${emailId}`);
+    }
+    
+    return { email, paymentReport };
   }
 
   /**
@@ -93,12 +97,13 @@ export class EmailAnalysisService {
     force?: boolean;
   }): Promise<{ analyzed: number; payments: number; failed: number }> {
     const query = this.emailRepo.createQueryBuilder('email')
+      .leftJoin('email.paymentReport', 'report')
       .where('email.userId = :userId', { userId })
       .orderBy('email.receivedAt', 'DESC');
 
-    // force가 아니면 analyzedAt이 null인 것만 (미분석 이메일만)
+    // force가 아니면 PaymentReport가 없는 것만 (미분석 이메일만)
     if (!options?.force) {
-      query.andWhere('email.analyzedAt IS NULL');
+      query.andWhere('report.id IS NULL');
     }
 
     if (options?.limit) {
@@ -106,7 +111,7 @@ export class EmailAnalysisService {
     }
 
     const emails = await query.getMany();
-    console.log(`[Payment Analysis] Found ${emails.length} emails to analyze for user ${userId}`);
+    console.log(`[Email Analysis] Found ${emails.length} emails to analyze for user ${userId}`);
 
     let analyzed = 0;
     let payments = 0;
@@ -116,11 +121,11 @@ export class EmailAnalysisService {
       try {
         const result = await this.analyzeEmail(email.id, options?.force);
         analyzed++;
-        if (result.paymentReport) {
+        if (result.paymentReport?.isPayment) {
           payments++;
         }
       } catch (error) {
-        console.error(`[Payment Analysis] Failed for email ${email.id}:`, error.message);
+        console.error(`[Email Analysis] Failed for email ${email.id}:`, error.message);
         failed++;
       }
     }
@@ -193,9 +198,8 @@ export class EmailAnalysisService {
   async getUserPaymentReportsPaginated(userId: number, options: {
     page?: number;
     limit?: number;
-    year?: number;
-    month?: number;
-    day?: number;
+    search?: string;
+    category?: string;
     startDate?: string;
     endDate?: string;
   }): Promise<{
@@ -213,17 +217,20 @@ export class EmailAnalysisService {
 
     const query = this.paymentReportRepo.createQueryBuilder('report')
       .innerJoinAndSelect('report.email', 'email')
+      .leftJoinAndSelect('email.attachments', 'attachments')
       .where('email.userId = :userId', { userId });
 
-    // 날짜 필터: year, month, day
-    if (options.year) {
-      query.andWhere('EXTRACT(YEAR FROM report.paymentDate) = :year', { year: options.year });
+    // 결제 리포트만 조회 (isPayment = true)
+    query.andWhere('report.isPayment = :isPayment', { isPayment: true });
+
+    // 검색어 필터 (email.searchText에서 ILIKE 검색)
+    if (options.search) {
+      query.andWhere('email.searchText ILIKE :search', { search: `%${options.search}%` });
     }
-    if (options.month) {
-      query.andWhere('EXTRACT(MONTH FROM report.paymentDate) = :month', { month: options.month });
-    }
-    if (options.day) {
-      query.andWhere('EXTRACT(DAY FROM report.paymentDate) = :day', { day: options.day });
+
+    // 카테고리 필터
+    if (options.category) {
+      query.andWhere('report.category = :category', { category: options.category });
     }
 
     // 날짜 범위 필터: startDate, endDate
@@ -336,7 +343,8 @@ export class EmailAnalysisService {
     limit?: number;
   }): Promise<Email[]> {
     const query = this.emailRepo.createQueryBuilder('email')
-      .where('email.analyzedAt IS NULL') // 아직 분석 안 된 이메일만
+      .leftJoin('email.paymentReport', 'report')
+      .where('report.id IS NULL') // PaymentReport가 없는 이메일만 (미분석)
       .orderBy('email.receivedAt', 'DESC');
 
     if (options?.limit) {
@@ -347,9 +355,32 @@ export class EmailAnalysisService {
   }
 
   /**
-   * 이메일에서 파일 수집 (HTML 이미지 URL + 첨부파일: 이미지 + PDF)
+   * 모든 PaymentReport 삭제 (규칙 변경 시 재분석용)
    */
-  private async collectFiles(emailId: number, htmlBody: string | null, maxCount = 5): Promise<FileData[]> {
+  async deleteAllReports(): Promise<number> {
+    const result = await this.paymentReportRepo.delete({});
+    console.log(`[Email Analysis] Deleted ${result.affected} reports`);
+    return result.affected || 0;
+  }
+
+  /**
+   * 특정 사용자의 PaymentReport 삭제
+   */
+  async deleteUserReports(userId: number): Promise<number> {
+    const result = await this.paymentReportRepo
+      .createQueryBuilder('report')
+      .delete()
+      .where('report.emailId IN (SELECT id FROM emails WHERE "userId" = :userId)', { userId })
+      .execute();
+    console.log(`[Email Analysis] Deleted ${result.affected} reports for user ${userId}`);
+    return result.affected || 0;
+  }
+
+  /**
+   * 이메일에서 파일 수집 (HTML 이미지 URL + 첨부파일: 이미지 + PDF)
+   * 200x200 이하 이미지는 스킵
+   */
+  private async collectFiles(emailId: number, htmlBody: string | null): Promise<FileData[]> {
     const files: FileData[] = [];
 
     // 1. PDF 첨부파일 먼저 추가 (결제 정보가 PDF에 있을 확률이 높음)
@@ -358,15 +389,13 @@ export class EmailAnalysisService {
         emailId,
         mimeType: 'application/pdf',
       },
-      take: 3, // PDF는 최대 3개
+      take: 5, // PDF는 최대 5개
     });
 
     for (const att of pdfAttachments) {
-      if (files.length >= maxCount) break;
-      
       // 너무 큰 PDF는 스킵 (10MB 이상)
       if (att.data && att.data.length > 10 * 1024 * 1024) {
-        console.log(`[Payment Analysis] Skipping large PDF: ${att.filename} (${this.formatSize(att.data.length)})`);
+        console.log(`[File Collect] Skipping large PDF: ${att.filename} (${this.formatSize(att.data.length)})`);
         continue;
       }
 
@@ -379,19 +408,19 @@ export class EmailAnalysisService {
         });
       }
     }
-    console.log(`[Payment Analysis] Found ${files.length} PDF attachments`);
+    console.log(`[File Collect] Found ${files.length} PDF attachments`);
 
-    // 2. HTML body에서 이미지 URL 추출 → 다운로드해서 base64로 변환
-    if (htmlBody && files.length < maxCount) {
+    // 2. HTML body에서 이미지 URL 추출 → 다운로드해서 base64로 변환 (200x200 이상만)
+    if (htmlBody) {
       const urlImages = this.extractImageUrlsFromHtml(htmlBody);
+      console.log(`[File Collect] Processing ${urlImages.length} image URLs...`);
+      
       for (const url of urlImages) {
-        if (files.length >= maxCount) break;
-        
         // 유효한 이미지 URL인지 확인 (http/https)
         if (url.startsWith('http://') || url.startsWith('https://')) {
-          // 트래킹 픽셀이나 너무 작은 이미지 제외
+          // URL 패턴으로 트래킹 픽셀 사전 필터링
           if (this.isLikelyContentImage(url)) {
-            // URL 이미지를 다운로드해서 base64로 변환
+            // URL 이미지를 다운로드해서 base64로 변환 (200x200 이상만)
             const downloaded = await this.downloadImageAsBase64(url);
             if (downloaded) {
               files.push(downloaded);
@@ -401,63 +430,74 @@ export class EmailAnalysisService {
       }
     }
 
-    // 3. 첨부된 인라인 이미지 추가
-    if (files.length < maxCount) {
-      const imageAttachments = await this.attachmentRepo.find({
-        where: { 
-          emailId,
-          isInline: true,
-        },
-        take: maxCount - files.length,
-      });
+    // 3. 첨부된 인라인 이미지 추가 (200x200 이상만)
+    const imageAttachments = await this.attachmentRepo.find({
+      where: { 
+        emailId,
+        isInline: true,
+      },
+    });
 
-      for (const att of imageAttachments) {
-        if (files.length >= maxCount) break;
-        
-        // 이미지 타입만 처리
-        if (!att.mimeType?.startsWith('image/')) continue;
+    for (const att of imageAttachments) {
+      // 이미지 타입만 처리
+      if (!att.mimeType?.startsWith('image/')) continue;
 
-        // 너무 큰 이미지는 스킵 (5MB 이상)
-        if (att.data && att.data.length > 5 * 1024 * 1024) {
-          console.log(`[Payment Analysis] Skipping large image: ${att.filename}`);
-          continue;
+      // 너무 큰 이미지는 스킵 (5MB 이상)
+      if (att.data && att.data.length > 5 * 1024 * 1024) {
+        console.log(`[File Collect] Skipping large image: ${att.filename}`);
+        continue;
+      }
+
+      if (att.data) {
+        // 이미지 크기 확인 (200x200 이상만)
+        try {
+          const dimensions = imageSize(att.data);
+          if (dimensions.width && dimensions.height) {
+            if (dimensions.width < 200 || dimensions.height < 200) {
+              console.log(`[File Collect] Skipping small inline image: ${att.filename} (${dimensions.width}x${dimensions.height})`);
+              continue;
+            }
+            console.log(`[File Collect] Inline image: ${att.filename} (${dimensions.width}x${dimensions.height})`);
+          }
+        } catch {
+          // 크기 확인 실패 시 포함
         }
 
-        if (att.data) {
-          files.push({
-            type: 'base64',
-            data: att.data.toString('base64'),
-            mimeType: att.mimeType,
-            filename: att.filename,
-          });
-        }
+        files.push({
+          type: 'base64',
+          data: att.data.toString('base64'),
+          mimeType: att.mimeType,
+          filename: att.filename,
+        });
       }
     }
 
-    console.log(`[Payment Analysis] Total ${files.length} files collected for email ${emailId}`);
+    console.log(`[File Collect] Total ${files.length} files collected for email ${emailId}`);
     return files;
   }
 
   /**
    * URL에서 이미지 다운로드 후 base64로 변환
-   * CDN에서 차단되거나 실패 시 null 반환
+   * 200x200 이하 또는 실패 시 null 반환
    */
   private async downloadImageAsBase64(url: string): Promise<FileData | null> {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000); // 5초 타임아웃
+      const timeout = setTimeout(() => controller.abort(), 10000); // 10초 타임아웃
 
       const response = await fetch(url, {
         signal: controller.signal,
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': 'image/*',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+          'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+          'Referer': new URL(url).origin,
         },
       });
       clearTimeout(timeout);
 
       if (!response.ok) {
-        console.log(`[Payment Analysis] Image download failed (${response.status}): ${url.substring(0, 80)}...`);
+        console.log(`[Image Download] Failed (${response.status}): ${url.substring(0, 80)}...`);
         return null;
       }
 
@@ -465,26 +505,39 @@ export class EmailAnalysisService {
       
       // 이미지가 아니면 스킵
       if (!contentType.startsWith('image/')) {
-        console.log(`[Payment Analysis] Not an image (${contentType}): ${url.substring(0, 80)}...`);
+        console.log(`[Image Download] Not an image (${contentType}): ${url.substring(0, 80)}...`);
         return null;
       }
 
       const arrayBuffer = await response.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
 
-      // 너무 작은 이미지는 스킵 (1KB 미만 = 트래킹 픽셀 가능성)
+      // 너무 작은 파일은 스킵 (1KB 미만)
       if (buffer.length < 1024) {
-        console.log(`[Payment Analysis] Skipping tiny image (${buffer.length} bytes)`);
+        console.log(`[Image Download] Skipping tiny file (${buffer.length} bytes)`);
         return null;
       }
 
       // 너무 큰 이미지는 스킵 (5MB 이상)
       if (buffer.length > 5 * 1024 * 1024) {
-        console.log(`[Payment Analysis] Skipping large image (${this.formatSize(buffer.length)})`);
+        console.log(`[Image Download] Skipping large image (${this.formatSize(buffer.length)})`);
         return null;
       }
 
-      console.log(`[Payment Analysis] Downloaded image (${this.formatSize(buffer.length)}): ${url.substring(0, 50)}...`);
+      // 이미지 크기 확인 (200x200 이상만)
+      try {
+        const dimensions = imageSize(buffer);
+        if (dimensions.width && dimensions.height) {
+          if (dimensions.width < 200 || dimensions.height < 200) {
+            console.log(`[Image Download] Skipping small image (${dimensions.width}x${dimensions.height}): ${url.substring(0, 60)}...`);
+            return null;
+          }
+          console.log(`[Image Download] OK (${dimensions.width}x${dimensions.height}, ${this.formatSize(buffer.length)}): ${url.substring(0, 60)}...`);
+        }
+      } catch {
+        // 크기 확인 실패해도 포함 (SVG 등)
+        console.log(`[Image Download] OK (size unknown, ${this.formatSize(buffer.length)}): ${url.substring(0, 60)}...`);
+      }
       
       return {
         type: 'base64',
@@ -492,7 +545,7 @@ export class EmailAnalysisService {
         mimeType: contentType,
       };
     } catch (error) {
-      console.log(`[Payment Analysis] Image download error: ${error.message} - ${url.substring(0, 50)}...`);
+      console.log(`[Image Download] Error: ${error.message} - ${url.substring(0, 60)}...`);
       return null;
     }
   }
@@ -503,27 +556,46 @@ export class EmailAnalysisService {
   private extractImageUrlsFromHtml(html: string): string[] {
     const urls: string[] = [];
     
-    // <img src="..."> 패턴 매칭
-    const imgRegex = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
+    // <img src="..."> 패턴 매칭 (src 속성값 전체 추출)
+    const imgRegex = /<img[^>]+src\s*=\s*["']([^"']+)["']/gi;
     let match;
     
     while ((match = imgRegex.exec(html)) !== null) {
-      const url = match[1];
+      let url = match[1];
+      // HTML 엔티티 디코딩 (&amp; → &, &#38; → & 등)
+      url = this.decodeHtmlEntities(url);
       if (url && !urls.includes(url)) {
         urls.push(url);
+        console.log(`[Image Extract] Found: ${url.substring(0, 100)}${url.length > 100 ? '...' : ''}`);
       }
     }
 
     // background-image: url(...) 패턴도 체크
     const bgRegex = /background-image:\s*url\(["']?([^"')]+)["']?\)/gi;
     while ((match = bgRegex.exec(html)) !== null) {
-      const url = match[1];
+      let url = match[1];
+      url = this.decodeHtmlEntities(url);
       if (url && !urls.includes(url)) {
         urls.push(url);
       }
     }
 
+    console.log(`[Image Extract] Total ${urls.length} image URLs found`);
     return urls;
+  }
+
+  /**
+   * HTML 엔티티 디코딩 (URL용)
+   */
+  private decodeHtmlEntities(str: string): string {
+    return str
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&#38;/g, '&')
+      .replace(/&#x26;/gi, '&');
   }
 
   /**

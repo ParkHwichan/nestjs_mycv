@@ -52,6 +52,9 @@ export class Email {
   @Column('text', { nullable: true })
   htmlBody: string; // HTML
 
+  @Column('text', { nullable: true })
+  searchText: string; // 검색용 텍스트 (subject + from + body + htmlBody 정제)
+
   @Column({ nullable: true })
   snippet: string;
 

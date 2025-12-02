@@ -44,6 +44,9 @@ import { EmailAnalysisModule } from './email-analysis/email-analysis.module';
         database: configService.get('DB_DATABASE', 'mycv'),
         entities: [User, Report, GoogleToken, Email, EmailAttachment, PaymentReport],
         synchronize: configService.get('NODE_ENV') !== 'production',
+        extra: {
+          client_encoding: 'UTF8',
+        },
       }),
     }), 
     OpenaiModule,

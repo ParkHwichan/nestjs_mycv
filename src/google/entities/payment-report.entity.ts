@@ -22,6 +22,10 @@ export class PaymentReport {
   @JoinColumn({ name: 'emailId' })
   email: Email;
 
+  @Column({ default: false })
+  @Index()
+  isPayment: boolean; // 결제 관련 이메일인지 여부
+
   @Column({ type: 'decimal', precision: 12, scale: 2, nullable: true })
   amount: number; // 결제 금액
 
@@ -39,6 +43,10 @@ export class PaymentReport {
 
   @Column({ nullable: true })
   paymentType: string; // 결제 유형 (온라인/오프라인/구독 등)
+
+  @Column({ length: 20, nullable: true })
+  @Index()
+  category: string; // 소비 카테고리 (transport, living, hobby, other)
 
   @Column('text', { nullable: true })
   summary: string; // GPT 요약

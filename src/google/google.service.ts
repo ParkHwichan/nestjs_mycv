@@ -130,7 +130,15 @@ export class GoogleService {
     // 2. 메일 파싱
     const parsed = this.parseGmailMessage(gmailMessage);
 
-    // 3. Email 엔티티 생성
+    // 3. 검색용 텍스트 생성
+    const searchText = this.buildSearchText(
+      parsed.subject,
+      parsed.from,
+      parsed.body,
+      parsed.htmlBody,
+    );
+
+    // 4. Email 엔티티 생성
     const email = this.emailRepo.create({
       userId,
       messageId: gmailMessage.id,
@@ -141,6 +149,7 @@ export class GoogleService {
       subject: parsed.subject,
       body: parsed.body,
       htmlBody: parsed.htmlBody,
+      searchText,
       snippet: gmailMessage.snippet,
       labelIds: gmailMessage.labelIds,
       receivedAt: new Date(parseInt(gmailMessage.internalDate)),
@@ -149,11 +158,11 @@ export class GoogleService {
       hasImages: parsed.inlineImages.length > 0,
     });
 
-    // 4. DB에 저장
+    // 5. DB에 저장
     await this.emailRepo.save(email);
     console.log(`[Gmail Sync] Saved email: ${email.subject?.substring(0, 30)}...`);
 
-    // 5. 첨부파일 및 이미지 저장
+    // 6. 첨부파일 및 이미지 저장
     const allAttachments = [...parsed.attachments, ...parsed.inlineImages];
     for (const att of allAttachments) {
       try {
@@ -209,6 +218,15 @@ export class GoogleService {
   }
 
   /**
+   * Gmail API의 URL-safe Base64 디코딩
+   */
+  private decodeBase64Url(data: string): string {
+    // URL-safe Base64 → 일반 Base64 변환
+    const base64 = data.replace(/-/g, '+').replace(/_/g, '/');
+    return Buffer.from(base64, 'base64').toString('utf-8');
+  }
+
+  /**
    * Gmail 메시지 파싱
    */
   private parseGmailMessage(message: any): any {
@@ -258,12 +276,12 @@ export class GoogleService {
           });
         }
         
-        // 본문 추출
+        // 본문 추출 (URL-safe Base64 디코딩)
         if (part.mimeType === 'text/plain' && part.body?.data && !textBody) {
-          textBody = Buffer.from(part.body.data, 'base64').toString('utf-8');
+          textBody = this.decodeBase64Url(part.body.data);
         }
         if (part.mimeType === 'text/html' && part.body?.data) {
-          htmlBody = Buffer.from(part.body.data, 'base64').toString('utf-8');
+          htmlBody = this.decodeBase64Url(part.body.data);
         }
         
         if (part.parts) {
@@ -275,9 +293,9 @@ export class GoogleService {
     if (message.payload?.body?.data) {
       const mimeType = message.payload.mimeType;
       if (mimeType === 'text/html') {
-        htmlBody = Buffer.from(message.payload.body.data, 'base64').toString('utf-8');
+        htmlBody = this.decodeBase64Url(message.payload.body.data);
       } else {
-        textBody = Buffer.from(message.payload.body.data, 'base64').toString('utf-8');
+        textBody = this.decodeBase64Url(message.payload.body.data);
       }
     }
     
@@ -285,16 +303,83 @@ export class GoogleService {
       extractParts(message.payload.parts);
     }
 
+    // 포워딩 메일인 경우 원래 발신자 추출
+    let from = getHeader('From');
+    const subject = getHeader('Subject');
+    
+    if (this.isForwardedEmail(subject)) {
+      const originalFrom = this.extractOriginalSender(textBody || htmlBody);
+      if (originalFrom) {
+        from = originalFrom;
+      }
+    }
+
     return {
-      from: getHeader('From'),
+      from,
       to: getHeader('To'),
       cc: getHeader('Cc'),
-      subject: getHeader('Subject'),
+      subject,
       body: textBody,
       htmlBody: htmlBody,
       attachments,
       inlineImages,
     };
+  }
+
+  /**
+   * 포워딩된 이메일인지 확인
+   */
+  private isForwardedEmail(subject: string | undefined): boolean {
+    if (!subject) return false;
+    const lowerSubject = subject.toLowerCase();
+    return lowerSubject.startsWith('fwd:') || 
+           lowerSubject.startsWith('fw:') ||
+           lowerSubject.startsWith('전달:') ||
+           lowerSubject.includes('forwarded');
+  }
+
+  /**
+   * 포워딩된 이메일에서 원래 발신자 추출
+   */
+  private extractOriginalSender(body: string | undefined): string | null {
+    if (!body) return null;
+
+    // 패턴 1: "From: Name <email@example.com>" 형식
+    // 패턴 2: "From: email@example.com" 형식
+    // 패턴 3: "보낸 사람: ..." 형식 (한글)
+    const patterns = [
+      /From:\s*(.+?<[^>]+>)/i,                    // From: Name <email>
+      /From:\s*([^\n<]+@[^\n\s>]+)/i,            // From: email@domain
+      /보낸\s*사람:\s*(.+?<[^>]+>)/i,             // 한글: 보낸 사람: Name <email>
+      /보낸\s*사람:\s*([^\n<]+@[^\n\s>]+)/i,      // 한글: 보낸 사람: email@domain
+      /발신자:\s*(.+?<[^>]+>)/i,                  // 한글: 발신자: Name <email>
+    ];
+
+    // "Forwarded message" 또는 "전달된 메시지" 이후의 From만 찾기
+    const forwardMarkers = [
+      '---------- Forwarded message ---------',
+      '---------- 전달된 메시지 ----------',
+      '-------- Original Message --------',
+      '원본 메시지',
+    ];
+
+    let searchBody = body;
+    for (const marker of forwardMarkers) {
+      const idx = body.indexOf(marker);
+      if (idx !== -1) {
+        searchBody = body.substring(idx);
+        break;
+      }
+    }
+
+    for (const pattern of patterns) {
+      const match = searchBody.match(pattern);
+      if (match && match[1]) {
+        return match[1].trim();
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -367,5 +452,58 @@ export class GoogleService {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  /**
+   * 검색용 텍스트 생성 (subject + from + body + htmlBody 정제)
+   */
+  private buildSearchText(
+    subject: string | undefined,
+    from: string | undefined,
+    body: string | undefined,
+    htmlBody: string | undefined,
+  ): string {
+    const parts: string[] = [];
+
+    if (subject) parts.push(subject);
+    if (from) parts.push(from);
+    if (body) parts.push(body);
+    if (htmlBody) parts.push(this.extractTextFromHtml(htmlBody));
+
+    // 중복 문장 제거
+    const allText = parts.join(' ');
+    const sentences = allText
+      .split(/[.!?\n]+/)
+      .map(s => s.trim().toLowerCase().replace(/\s+/g, ' '))
+      .filter(s => s.length > 10);
+
+    const uniqueSentences = [...new Set(sentences)];
+    return uniqueSentences.join(' ');
+  }
+
+  /**
+   * HTML에서 텍스트만 추출
+   */
+  private extractTextFromHtml(html: string): string {
+    return html
+      .replace(/<head[^>]*>[\s\S]*?<\/head>/gi, '')
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/p>/gi, '\n')
+      .replace(/<\/div>/gi, '\n')
+      .replace(/<\/tr>/gi, '\n')
+      .replace(/<\/li>/gi, '\n')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/[ \t]+/g, ' ')
+      .replace(/\n\s*\n+/g, '\n')
+      .trim();
   }
 }
