@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Gmail Reader</title>
+    <meta charset="utf-8" />
+    <style>
+      * {
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 20px;
+        background: #f0f2f5;
+        min-height: 100vh;
+      }
+      .container {
+        max-width: 900px;
+        margin: 0 auto;
+      }
+      .card {
+        background: white;
+        border-radius: 12px;
+        padding: 24px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        margin-bottom: 20px;
+      }
+      .header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+      }
+      h1 { margin: 0; font-size: 24px; color: #333; }
+      .user-info {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .avatar {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+      }
+      .btn {
+        padding: 10px 20px;
+        border-radius: 6px;
+        text-decoration: none;
+        font-weight: 500;
+        cursor: pointer;
+        border: none;
+        font-size: 14px;
+      }
+      .btn-primary { background: #4285f4; color: white; }
+      .btn-danger { background: #dc3545; color: white; }
+      .btn-secondary { background: #6c757d; color: white; }
+      .btn:hover { opacity: 0.9; }
+      
+      /* 메일 목록 */
+      .mail-list { display: flex; flex-direction: column; gap: 2px; }
+      .mail-item {
+        padding: 12px 16px;
+        background: #fafafa;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 15px;
+        border-bottom: 1px solid #eee;
+      }
+      .mail-item:hover { background: #f0f0f0; }
+      .mail-item.unread { background: #e8f0fe; font-weight: 500; }
+      .mail-from { width: 200px; font-size: 14px; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .mail-subject { flex: 1; font-size: 14px; color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .mail-date { font-size: 12px; color: #888; white-space: nowrap; }
+      
+      /* 메일 상세 */
+      .mail-detail { padding: 20px; background: #fff; border-radius: 8px; border: 1px solid #e0e0e0; }
+      .mail-detail-header { border-bottom: 1px solid #eee; padding-bottom: 15px; margin-bottom: 15px; }
+      .mail-detail-subject { font-size: 20px; font-weight: 600; margin-bottom: 10px; }
+      .mail-detail-meta { font-size: 13px; color: #666; line-height: 1.8; }
+      .mail-detail-body { line-height: 1.6; white-space: pre-wrap; font-size: 14px; margin-top: 20px; }
+      .mail-html-body { line-height: 1.6; font-size: 14px; overflow-x: auto; }
+      .mail-html-body img { max-width: 100%; height: auto; }
+      
+      /* 첨부파일 */
+      .attachments { margin-top: 15px; padding: 15px; background: #f8f9fa; border-radius: 8px; }
+      .attachment-list { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }
+      .attachment-item {
+        display: inline-flex; align-items: center; gap: 5px;
+        padding: 8px 12px; background: white; border: 1px solid #ddd;
+        border-radius: 6px; text-decoration: none; color: #333; font-size: 13px;
+      }
+      .attachment-item:hover { background: #e9ecef; }
+      .attachment-size { color: #888; font-size: 11px; }
+      
+      .loading { text-align: center; padding: 40px; color: #666; }
+      .error { background: #f8d7da; color: #721c24; padding: 15px; border-radius: 8px; }
+      .search-box { display: flex; gap: 10px; margin-bottom: 20px; }
+      .search-box input { flex: 1; padding: 10px 15px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
+      .back-btn { margin-bottom: 15px; }
+      .login-card { text-align: center; padding: 60px 40px; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div id="app"><div class="loading">로딩 중...</div></div>
+    </div>
+
+    <script>
+      let currentUser = null;
+
+      // 로그인 화면
+      function renderLogin() {
+        document.getElementById('app').innerHTML = `
+          <div class="card login-card">
+            <h1>📧 Gmail Reader</h1>
+            <p style="color:#666;margin:20px 0">Google 계정으로 로그인하여 메일을 확인하세요</p>
+            <a href="/auth/google" class="btn btn-primary">Google로 로그인</a>
+          </div>
+        `;
+      }
+
+      // 메인 화면
+      function renderMain(user) {
+        document.getElementById('app').innerHTML = `
+          <div class="card">
+            <div class="header">
+              <h1>📧 Gmail</h1>
+              <div class="user-info">
+                <img src="${user.picture || 'https://via.placeholder.com/40'}" class="avatar">
+                <span>${user.email}</span>
+                <a href="/auth/logout" class="btn btn-danger">로그아웃</a>
+              </div>
+            </div>
+            <div class="search-box">
+              <input type="text" id="searchQuery" placeholder="검색 (예: is:unread, from:someone@gmail.com)">
+              <button class="btn btn-primary" onclick="loadMails()">검색</button>
+              <button class="btn btn-secondary" onclick="loadMails('is:unread')">읽지 않음</button>
+            </div>
+            <div id="mailContent"><div class="loading">메일을 불러오는 중...</div></div>
+          </div>
+        `;
+        loadMails();
+      }
+
+      // 메일 목록 로드 (간단한 정보만)
+      async function loadMails(query) {
+        const searchQuery = query || document.getElementById('searchQuery')?.value || '';
+        const params = new URLSearchParams({ maxResults: '30' });
+        if (searchQuery) params.append('q', searchQuery);
+
+        document.getElementById('mailContent').innerHTML = '<div class="loading">메일을 불러오는 중...</div>';
+
+        try {
+          const res = await fetch('/google/gmail/messages?' + params.toString());
+          const data = await res.json();
+
+          if (!data.success) throw new Error(data.message);
+          if (data.data.length === 0) {
+            document.getElementById('mailContent').innerHTML = '<div class="loading">메일이 없습니다</div>';
+            return;
+          }
+
+          renderMailList(data.data);
+        } catch (err) {
+          document.getElementById('mailContent').innerHTML = `<div class="error">❌ ${err.message}</div>`;
+        }
+      }
+
+      // 메일 목록 렌더링 (제목, 보낸사람, 날짜만)
+      function renderMailList(mails) {
+        const html = `
+          <div class="mail-list">
+            ${mails.map(mail => `
+              <div class="mail-item ${mail.labelIds?.includes('UNREAD') ? 'unread' : ''}" 
+                   onclick="loadMailDetail('${mail.id}')">
+                <div class="mail-from">${escapeHtml(extractName(mail.from))}</div>
+                <div class="mail-subject">${escapeHtml(mail.subject || '(제목 없음)')}</div>
+                <div class="mail-date">${formatDate(mail.date)}</div>
+              </div>
+            `).join('')}
+          </div>
+        `;
+        document.getElementById('mailContent').innerHTML = html;
+      }
+
+      // 메일 상세 로드 (클릭 시)
+      async function loadMailDetail(messageId) {
+        document.getElementById('mailContent').innerHTML = '<div class="loading">메일을 불러오는 중...</div>';
+
+        try {
+          const res = await fetch(`/google/gmail/messages/${messageId}`);
+          const data = await res.json();
+
+          if (!data.success) throw new Error(data.message);
+          showMailDetail(data.data);
+        } catch (err) {
+          document.getElementById('mailContent').innerHTML = `
+            <div class="back-btn"><button class="btn btn-secondary" onclick="loadMails()">← 목록으로</button></div>
+            <div class="error">❌ ${err.message}</div>
+          `;
+        }
+      }
+
+      // 메일 상세 표시
+      function showMailDetail(mail) {
+        // 첨부파일
+        const attachmentsHtml = mail.attachments?.length > 0 ? `
+          <div class="attachments">
+            <strong>📎 첨부파일 (${mail.attachments.length}개)</strong>
+            <div class="attachment-list">
+              ${mail.attachments.map(att => `
+                <a href="/google/gmail/messages/${mail.id}/attachments/${att.id}?filename=${encodeURIComponent(att.filename)}" 
+                   class="attachment-item" download>
+                  ${getFileIcon(att.mimeType)} ${escapeHtml(att.filename)} 
+                  <span class="attachment-size">(${formatSize(att.size)})</span>
+                </a>
+              `).join('')}
+            </div>
+          </div>
+        ` : '';
+
+        // 인라인 이미지
+        const imagesHtml = mail.inlineImages?.length > 0 ? `
+          <div class="attachments">
+            <strong>🖼️ 이미지 (${mail.inlineImages.length}개)</strong>
+            <div class="attachment-list">
+              ${mail.inlineImages.map(img => `
+                <a href="/google/gmail/messages/${mail.id}/attachments/${img.id}?filename=${encodeURIComponent(img.filename)}" 
+                   class="attachment-item" target="_blank">
+                  🖼️ ${escapeHtml(img.filename)} 
+                  <span class="attachment-size">(${formatSize(img.size)})</span>
+                </a>
+              `).join('')}
+            </div>
+          </div>
+        ` : '';
+
+        // 본문 (HTML 또는 텍스트)
+        const bodyContent = mail.htmlBody 
+          ? `<div class="mail-html-body">${mail.htmlBody}</div>`
+          : `<div class="mail-detail-body">${escapeHtml(mail.body || mail.snippet || '')}</div>`;
+
+        document.getElementById('mailContent').innerHTML = `
+          <div class="back-btn">
+            <button class="btn btn-secondary" onclick="loadMails()">← 목록으로</button>
+          </div>
+          <div class="mail-detail">
+            <div class="mail-detail-header">
+              <div class="mail-detail-subject">${escapeHtml(mail.subject || '(제목 없음)')}</div>
+              <div class="mail-detail-meta">
+                <strong>보낸 사람:</strong> ${escapeHtml(mail.from || 'Unknown')}<br>
+                <strong>받는 사람:</strong> ${escapeHtml(mail.to || '')}<br>
+                ${mail.cc ? `<strong>참조:</strong> ${escapeHtml(mail.cc)}<br>` : ''}
+                <strong>날짜:</strong> ${mail.date || ''}
+              </div>
+              ${attachmentsHtml}
+              ${imagesHtml}
+            </div>
+            ${bodyContent}
+          </div>
+        `;
+      }
+
+      // 유틸리티 함수들
+      function formatDate(dateStr) {
+        if (!dateStr) return '';
+        const date = new Date(dateStr);
+        const now = new Date();
+        if (date.toDateString() === now.toDateString()) {
+          return date.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+        }
+        return date.toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' });
+      }
+
+      function formatSize(bytes) {
+        if (!bytes) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+      }
+
+      function escapeHtml(text) {
+        if (!text) return '';
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }
+
+      function extractName(from) {
+        if (!from) return 'Unknown';
+        // "이름 <email@domain.com>" 형식에서 이름만 추출
+        const match = from.match(/^([^<]+)/);
+        return match ? match[1].trim().replace(/"/g, '') : from;
+      }
+
+      function getFileIcon(mimeType) {
+        if (!mimeType) return '📄';
+        if (mimeType.startsWith('image/')) return '🖼️';
+        if (mimeType.includes('pdf')) return '📕';
+        if (mimeType.includes('word') || mimeType.includes('document')) return '📘';
+        if (mimeType.includes('excel') || mimeType.includes('sheet')) return '📗';
+        if (mimeType.includes('zip') || mimeType.includes('compressed')) return '📦';
+        return '📄';
+      }
+
+      // 초기화
+      async function init() {
+        const urlParams = new URLSearchParams(window.location.search);
+        const error = urlParams.get('error');
+        
+        if (error) {
+          document.getElementById('app').innerHTML = `
+            <div class="card">
+              <div class="error">❌ ${decodeURIComponent(error)}</div>
+              <br><a href="/" class="btn btn-primary">다시 시도</a>
+            </div>
+          `;
+          window.history.replaceState({}, '', '/');
+          return;
+        }
+
+        try {
+          const res = await fetch('/auth/me');
+          const data = await res.json();
+          data.logged_in ? renderMain(data.user) : renderLogin();
+        } catch (err) {
+          renderLogin();
+        }
+      }
+
+      init();
+    </script>
+  </body>
+</html>
