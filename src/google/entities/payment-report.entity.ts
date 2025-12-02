@@ -3,6 +3,7 @@ import {
   Column,
   PrimaryGeneratedColumn,
   OneToOne,
+  ManyToOne,
   CreateDateColumn,
   JoinColumn,
   Index,
@@ -21,6 +22,19 @@ export class PaymentReport {
   @OneToOne(() => Email, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'emailId' })
   email: Email;
+
+  // 중복 감지 관련 필드
+  @Column({ default: false })
+  @Index()
+  isDuplicate: boolean; // 중복 결제인지 여부
+
+  @Column({ nullable: true })
+  @Index()
+  primaryReportId: number; // 중복인 경우, 원본(대표) 리포트 ID
+
+  @ManyToOne(() => PaymentReport, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'primaryReportId' })
+  primaryReport: PaymentReport; // 원본 리포트 참조
 
   @Column({ default: false })
   @Index()

@@ -79,9 +79,9 @@ export class PaymentReportDto {
   paymentType: string;
 
   @ApiProperty({ 
-    example: 'living', 
+    example: 'food', 
     description: '소비 카테고리',
-    enum: ['transport', 'living', 'hobby', 'other'],
+    enum: ['food', 'grocery', 'transport', 'shopping', 'utilities', 'health', 'beauty', 'entertainment', 'travel', 'education', 'finance', 'subscription', 'gift', 'pet', 'other'],
     nullable: true 
   })
   category: string;
@@ -89,8 +89,57 @@ export class PaymentReportDto {
   @ApiProperty({ example: 'AT&T 통신비 $127.76 자동결제 완료', description: 'GPT 요약' })
   summary: string;
 
+  @ApiProperty({ example: false, description: '중복 결제 여부' })
+  isDuplicate: boolean;
+
+  @ApiProperty({ example: null, description: '중복인 경우 원본 리포트 ID', nullable: true })
+  primaryReportId: number;
+
   @ApiProperty({ example: '2025-12-02T10:30:00Z', description: '생성일' })
   createdAt: Date;
+}
+
+// 중복 감지 결과용 DTO
+export class DuplicateReportSummaryDto {
+  @ApiProperty({ example: 1, description: '리포트 ID' })
+  id: number;
+
+  @ApiProperty({ example: 123, description: '이메일 ID' })
+  emailId: number;
+
+  @ApiProperty({ example: 'Udemy', description: '가맹점' })
+  merchant: string;
+
+  @ApiProperty({ example: 27000, description: '결제 금액' })
+  amount: number;
+
+  @ApiProperty({ example: 'KRW', description: '통화' })
+  currency: string;
+
+  @ApiProperty({ example: '2025-11-12', description: '결제일' })
+  paymentDate: Date;
+
+  @ApiProperty({ example: '11월 12일 Udemy에서 강의를 27,000원에 결제', description: '요약' })
+  summary: string;
+}
+
+export class DuplicateGroupDto {
+  @ApiProperty({ type: DuplicateReportSummaryDto, description: '대표 리포트' })
+  primary: DuplicateReportSummaryDto;
+
+  @ApiProperty({ type: [DuplicateReportSummaryDto], description: '중복 리포트 목록' })
+  duplicates: DuplicateReportSummaryDto[];
+}
+
+export class DuplicateDetectionResponseDto {
+  @ApiProperty({ example: true })
+  success: boolean;
+
+  @ApiProperty({ example: 3, description: '발견된 중복 개수' })
+  duplicatesFound: number;
+
+  @ApiProperty({ type: [DuplicateGroupDto], description: '중복 그룹 목록' })
+  groups: DuplicateGroupDto[];
 }
 
 export class PaymentReportListResponseDto {

@@ -10,7 +10,7 @@ export interface PaymentInfo {
   paymentDate?: string; // 결제일 (ISO 문자열)
   cardType?: string; // 카드 종류
   paymentType?: string; // 결제 유형
-  category?: string; // 소비 카테고리 (transport, living, hobby, other)
+  category?: string; // 소비 카테고리 (food, grocery, transport, shopping, utilities, health, beauty, entertainment, travel, education, finance, subscription, gift, pet, other)
   summary?: string; // 요약
 }
 
@@ -84,9 +84,14 @@ ${extractedHtml.substring(0, 2000)}` : ''}
   "paymentDate": "YYYY-MM-DD 또는 null",  // 결제일
   "cardType": "문자열 또는 null",  // 카드 종류 (예: 신한카드, 삼성카드, Visa, Mastercard)
   "paymentType": "card_online/card_offline/subscription/autopay/transfer/mobile/other 또는 null",
-  "category": "transport/living/hobby/other 또는 null",  // 소비 카테고리
-  "summary": "문자열"  // 핵심 내용 2-3문장 요약
+  "category": "food/grocery/transport/shopping/utilities/health/beauty/entertainment/travel/education/finance/subscription/gift/pet/other 또는 null",  // 소비 카테고리
+  "summary": "문자열"  // 아래 형식 참고
 }
+
+**summary 작성 가이드**:
+- 결제 이메일: "[날짜]에 [장소/서비스]에서 [상품/내용]을 [금액]에 결제" 형식으로 간결하게
+- 비결제 이메일: 핵심 내용 1-2문장 요약
+예시: "12월 2일 스타벅스에서 아메리카노 2잔을 9,000원에 결제"
 
 paymentType 분류 기준 (반드시 아래 값 중 하나만 사용):
 - card_online: 온라인 카드결제 (쇼핑몰, 앱결제, 웹결제)
@@ -98,9 +103,20 @@ paymentType 분류 기준 (반드시 아래 값 중 하나만 사용):
 - other: 위 유형에 해당하지 않는 결제
 
 카테고리 분류 기준 (반드시 아래 값 중 하나만 사용):
-- transport: 교통 (택시, 버스, 지하철, 기차, 비행기, 주유, 톨비, 주차 등)
-- living: 생활 (식료품, 마트, 편의점, 음식점, 카페, 통신비, 공과금, 의료, 약국, 보험 등)
-- hobby: 취미 (게임, 영화, 음악, 스트리밍, 쇼핑, 의류, 화장품, 여행, 숙박 등)
+- food: 식비 (음식점, 배달, 카페, 베이커리)
+- grocery: 장보기 (마트, 편의점, 식료품)
+- transport: 교통 (택시, 버스, 지하철, 기차, 비행기, 주유, 톨비, 주차)
+- shopping: 쇼핑 (의류, 신발, 잡화, 온라인쇼핑)
+- utilities: 생활 (통신비, 전기, 가스, 수도, 관리비, 인터넷)
+- health: 의료 (병원, 약국, 건강검진, 의료보험)
+- beauty: 뷰티 (화장품, 미용실, 네일, 스파)
+- entertainment: 문화 (영화, 공연, 전시, 게임, 스트리밍)
+- travel: 여행 (숙박, 항공권, 렌터카, 여행상품)
+- education: 교육 (학원, 강의, 도서, 자격증)
+- finance: 금융 (이체, 대출이자, 수수료, 투자)
+- subscription: 구독 (Netflix, Spotify, 멤버십, SaaS)
+- gift: 선물 (선물, 경조사, 기부)
+- pet: 반려동물 (사료, 동물병원, 용품)
 - other: 위 카테고리에 해당하지 않는 경우
 
 결제 관련이 아닌 경우에도 isPayment: false와 summary는 반드시 포함해주세요.

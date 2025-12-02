@@ -35,8 +35,33 @@ export class GoogleService {
     
     const accessToken = await this.getValidAccessToken(userId);
     
+    // DB에서 가장 최근 이메일 날짜 조회 → after 쿼리 생성
+    const lastEmail = await this.emailRepo.findOne({
+      where: { userId },
+      order: { receivedAt: 'DESC' },
+      select: ['receivedAt'],
+    });
+
+    let query = options?.q || '';
+    if (lastEmail?.receivedAt) {
+      // Unix timestamp (초 단위) + 2초 (Gmail after: 경계 포함 문제 해결)
+      const afterTimestamp = Math.floor(lastEmail.receivedAt.getTime() / 1000) + 2;
+      query = query ? `${query} after:${afterTimestamp}` : `after:${afterTimestamp}`;
+      console.log(`[Gmail Sync] Using after filter: ${new Date(afterTimestamp * 1000).toISOString()}`);
+    } else {
+      // 최초 동기화: 최근 3개월로 제한
+      const threeMonthsAgo = new Date();
+      threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+      const afterTimestamp = Math.floor(threeMonthsAgo.getTime() / 1000);
+      query = query ? `${query} after:${afterTimestamp}` : `after:${afterTimestamp}`;
+      console.log(`[Gmail Sync] First sync - limiting to last 3 months: ${threeMonthsAgo.toISOString()}`);
+    }
+    
     // 1. Gmail에서 메일 목록 가져오기
-    const messageList = await this.fetchGmailMessageList(accessToken, options);
+    const messageList = await this.fetchGmailMessageList(accessToken, { 
+      ...options, 
+      q: query || undefined 
+    });
     
     if (!messageList.messages || messageList.messages.length === 0) {
       console.log('[Gmail Sync] No messages found');

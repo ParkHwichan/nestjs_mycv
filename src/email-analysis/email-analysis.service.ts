@@ -220,8 +220,9 @@ export class EmailAnalysisService {
       .leftJoinAndSelect('email.attachments', 'attachments')
       .where('email.userId = :userId', { userId });
 
-    // 결제 리포트만 조회 (isPayment = true)
+    // 결제 리포트만 조회 (isPayment = true, 중복 제외)
     query.andWhere('report.isPayment = :isPayment', { isPayment: true });
+    query.andWhere('report.isDuplicate = :isDuplicate', { isDuplicate: false });
 
     // 검색어 필터 (email.searchText에서 ILIKE 검색)
     if (options.search) {
@@ -274,6 +275,8 @@ export class EmailAnalysisService {
     const result = await this.paymentReportRepo.createQueryBuilder('report')
       .innerJoin('report.email', 'email')
       .where('email.userId = :userId', { userId })
+      .andWhere('report.isPayment = :isPayment', { isPayment: true })
+      .andWhere('report.isDuplicate = :isDuplicate', { isDuplicate: false })
       .andWhere('EXTRACT(YEAR FROM report.paymentDate) = :year', { year })
       .select('EXTRACT(MONTH FROM report.paymentDate)', 'month')
       .addSelect('SUM(report.amount)', 'totalAmount')
@@ -300,6 +303,8 @@ export class EmailAnalysisService {
     const result = await this.paymentReportRepo.createQueryBuilder('report')
       .innerJoin('report.email', 'email')
       .where('email.userId = :userId', { userId })
+      .andWhere('report.isPayment = :isPayment', { isPayment: true })
+      .andWhere('report.isDuplicate = :isDuplicate', { isDuplicate: false })
       .andWhere('EXTRACT(YEAR FROM report.paymentDate) = :year', { year })
       .andWhere('EXTRACT(MONTH FROM report.paymentDate) = :month', { month })
       .select('EXTRACT(DAY FROM report.paymentDate)', 'day')
@@ -632,6 +637,226 @@ export class EmailAnalysisService {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  // ==================== 중복 감지 ====================
+
+  /**
+   * 특정 사용자의 결제 리포트에서 중복 감지
+   */
+  async detectDuplicates(userId: number): Promise<{
+    duplicatesFound: number;
+    groups: { primary: PaymentReport; duplicates: PaymentReport[] }[];
+  }> {
+    // isPayment=true인 리포트만 가져오기
+    const reports = await this.paymentReportRepo.find({
+      where: { isPayment: true, isDuplicate: false },
+      relations: ['email'],
+      order: { paymentDate: 'ASC', createdAt: 'ASC' },
+    });
+
+    // 해당 userId의 리포트만 필터링
+    const userReports = reports.filter(r => r.email?.userId === userId);
+    
+    console.log(`[Duplicate Detection] Checking ${userReports.length} reports for user ${userId}`);
+
+    const groups: { primary: PaymentReport; duplicates: PaymentReport[] }[] = [];
+    const processed = new Set<number>();
+
+    for (let i = 0; i < userReports.length; i++) {
+      const report = userReports[i];
+      if (processed.has(report.id)) continue;
+
+      const duplicates: PaymentReport[] = [];
+
+      for (let j = i + 1; j < userReports.length; j++) {
+        const other = userReports[j];
+        if (processed.has(other.id)) continue;
+
+        if (this.isPotentialDuplicate(report, other)) {
+          duplicates.push(other);
+          processed.add(other.id);
+        }
+      }
+
+      if (duplicates.length > 0) {
+        // 더 상세한 정보가 있는 리포트를 primary로 선택
+        const allInGroup = [report, ...duplicates];
+        const primary = this.selectPrimaryReport(allInGroup);
+        const others = allInGroup.filter(r => r.id !== primary.id);
+
+        groups.push({ primary, duplicates: others });
+        processed.add(report.id);
+      }
+    }
+
+    console.log(`[Duplicate Detection] Found ${groups.length} duplicate groups`);
+    return {
+      duplicatesFound: groups.reduce((sum, g) => sum + g.duplicates.length, 0),
+      groups,
+    };
+  }
+
+  /**
+   * 중복 감지 결과를 DB에 저장 (isDuplicate, primaryReportId 설정)
+   */
+  async markDuplicates(userId: number): Promise<{
+    marked: number;
+    groups: { primaryId: number; duplicateIds: number[] }[];
+  }> {
+    const { groups } = await this.detectDuplicates(userId);
+
+    const result: { primaryId: number; duplicateIds: number[] }[] = [];
+    let marked = 0;
+
+    for (const group of groups) {
+      const duplicateIds: number[] = [];
+
+      for (const dup of group.duplicates) {
+        await this.paymentReportRepo.update(dup.id, {
+          isDuplicate: true,
+          primaryReportId: group.primary.id,
+        });
+        duplicateIds.push(dup.id);
+        marked++;
+      }
+
+      result.push({
+        primaryId: group.primary.id,
+        duplicateIds,
+      });
+    }
+
+    console.log(`[Duplicate Detection] Marked ${marked} duplicates`);
+    return { marked, groups: result };
+  }
+
+  /**
+   * 중복 플래그 초기화 (재감지 전 사용)
+   */
+  async resetDuplicates(userId: number): Promise<number> {
+    const reports = await this.paymentReportRepo.find({
+      where: { isDuplicate: true },
+      relations: ['email'],
+    });
+
+    const userReports = reports.filter(r => r.email?.userId === userId);
+    
+    for (const report of userReports) {
+      await this.paymentReportRepo.update(report.id, {
+        isDuplicate: false,
+        primaryReportId: undefined,
+      });
+    }
+
+    console.log(`[Duplicate Detection] Reset ${userReports.length} duplicates for user ${userId}`);
+    return userReports.length;
+  }
+
+  /**
+   * 두 리포트가 중복인지 판단
+   */
+  private isPotentialDuplicate(a: PaymentReport, b: PaymentReport): boolean {
+    // 1. 날짜 비교 (같은 날 ±1일)
+    if (!this.isSameDay(a.paymentDate, b.paymentDate, 1)) {
+      return false;
+    }
+
+    // 2. 금액 비교 (둘 다 있으면 같아야 함)
+    if (a.amount && b.amount && Math.abs(a.amount - b.amount) > 0.01) {
+      return false;
+    }
+
+    // 3. 가맹점 비교 (유사도)
+    if (!this.isSimilarMerchant(a.merchant, b.merchant)) {
+      return false;
+    }
+
+    console.log(`[Duplicate] Potential match: "${a.merchant}" (${a.amount}) <-> "${b.merchant}" (${b.amount})`);
+    return true;
+  }
+
+  /**
+   * 날짜가 같은지 비교 (±허용일 포함)
+   */
+  private isSameDay(date1: Date | null, date2: Date | null, toleranceDays = 0): boolean {
+    if (!date1 || !date2) return true; // 날짜 없으면 통과
+    
+    const d1 = new Date(date1);
+    const d2 = new Date(date2);
+    
+    // 시간 제거
+    d1.setHours(0, 0, 0, 0);
+    d2.setHours(0, 0, 0, 0);
+
+    const diffDays = Math.abs((d1.getTime() - d2.getTime()) / (1000 * 60 * 60 * 24));
+    return diffDays <= toleranceDays;
+  }
+
+  /**
+   * 가맹점 이름이 유사한지 판단
+   */
+  private isSimilarMerchant(a: string | null, b: string | null): boolean {
+    if (!a || !b) return true; // 하나라도 없으면 통과
+
+    const normA = this.normalizeMerchant(a);
+    const normB = this.normalizeMerchant(b);
+
+    // 정규화 후 같으면 중복
+    if (normA === normB) return true;
+
+    // 한쪽이 다른쪽을 포함하면 중복
+    if (normA.includes(normB) || normB.includes(normA)) return true;
+
+    // 공통 단어가 있으면 중복 (첫 번째 단어 기준)
+    const wordsA = normA.split(/\s+/);
+    const wordsB = normB.split(/\s+/);
+    
+    if (wordsA[0] && wordsB[0] && wordsA[0].length >= 3) {
+      if (wordsA[0] === wordsB[0]) return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * 가맹점 이름 정규화
+   */
+  private normalizeMerchant(merchant: string): string {
+    return merchant
+      .toLowerCase()
+      .replace(/[,.()\[\]{}'"]/g, '') // 특수문자 제거
+      .replace(/\s+(inc|llc|ltd|co|corp|corporation)\.?$/i, '') // 회사 접미사 제거
+      .replace(/\s*\(.*?\)\s*/g, ' ') // 괄호 안 내용 제거 (NaverPay 등)
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  /**
+   * 그룹 중 가장 상세한 정보를 가진 리포트 선택
+   */
+  private selectPrimaryReport(reports: PaymentReport[]): PaymentReport {
+    return reports.reduce((best, current) => {
+      const bestScore = this.getDetailScore(best);
+      const currentScore = this.getDetailScore(current);
+      return currentScore > bestScore ? current : best;
+    });
+  }
+
+  /**
+   * 리포트의 상세 정보 점수 계산
+   */
+  private getDetailScore(report: PaymentReport): number {
+    let score = 0;
+    if (report.amount) score += 10;
+    if (report.merchant) score += 5;
+    if (report.paymentDate) score += 5;
+    if (report.cardType) score += 3;
+    if (report.currency) score += 2;
+    if (report.paymentType) score += 2;
+    if (report.category) score += 2;
+    if (report.summary?.length > 20) score += 1;
+    return score;
   }
 }
 

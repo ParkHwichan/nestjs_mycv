@@ -86,7 +86,7 @@ export class EmailAnalysisController {
   @ApiQuery({ name: 'page', required: false, description: '페이지 번호 (기본값: 1)' })
   @ApiQuery({ name: 'limit', required: false, description: '페이지당 개수 (기본값: 20, 최대: 100)' })
   @ApiQuery({ name: 'search', required: false, description: '검색어 (searchText에서 검색)' })
-  @ApiQuery({ name: 'category', required: false, description: '카테고리 필터', enum: ['transport', 'living', 'hobby', 'other'] })
+  @ApiQuery({ name: 'category', required: false, description: '카테고리 필터', enum: ['food', 'grocery', 'transport', 'shopping', 'utilities', 'health', 'beauty', 'entertainment', 'travel', 'education', 'finance', 'subscription', 'gift', 'pet', 'other'] })
   @ApiQuery({ name: 'startDate', required: false, description: '시작일 (YYYY-MM-DD)' })
   @ApiQuery({ name: 'endDate', required: false, description: '종료일 (YYYY-MM-DD)' })
   @ApiResponse({ status: 200, description: '성공', type: PaymentReportListResponseDto })
@@ -349,5 +349,90 @@ export class EmailAnalysisController {
 
     const cleared = this.emailAnalysisScheduler.clearQueue();
     return { success: true, cleared };
+  }
+
+  // ==================== 중복 감지 API ====================
+
+  @Get('duplicates/detect')
+  @ApiOperation({ 
+    summary: '중복 결제 감지', 
+    description: '같은 날짜 + 같은 금액 + 유사한 가맹점의 중복 결제를 감지합니다. DB에 저장하지 않고 미리보기만 합니다.' 
+  })
+  async detectDuplicates(@Session() session: any) {
+    if (!session.userId) {
+      return { success: false, message: 'Not logged in' };
+    }
+
+    try {
+      const result = await this.emailAnalysisService.detectDuplicates(session.userId);
+      
+      return {
+        success: true,
+        duplicatesFound: result.duplicatesFound,
+        groups: result.groups.map(g => ({
+          primary: {
+            id: g.primary.id,
+            emailId: g.primary.emailId,
+            merchant: g.primary.merchant,
+            amount: g.primary.amount,
+            currency: g.primary.currency,
+            paymentDate: g.primary.paymentDate,
+            summary: g.primary.summary,
+          },
+          duplicates: g.duplicates.map(d => ({
+            id: d.id,
+            emailId: d.emailId,
+            merchant: d.merchant,
+            amount: d.amount,
+            currency: d.currency,
+            paymentDate: d.paymentDate,
+            summary: d.summary,
+          })),
+        })),
+      };
+    } catch (err) {
+      return { success: false, message: err.message };
+    }
+  }
+
+  @Post('duplicates/mark')
+  @ApiOperation({ 
+    summary: '중복 결제 표시', 
+    description: '감지된 중복 결제를 DB에 표시합니다. 중복으로 표시된 결제는 목록 조회 시 제외됩니다.' 
+  })
+  async markDuplicates(@Session() session: any) {
+    if (!session.userId) {
+      return { success: false, message: 'Not logged in' };
+    }
+
+    try {
+      const result = await this.emailAnalysisService.markDuplicates(session.userId);
+      
+      return {
+        success: true,
+        marked: result.marked,
+        groups: result.groups,
+      };
+    } catch (err) {
+      return { success: false, message: err.message };
+    }
+  }
+
+  @Delete('duplicates/reset')
+  @ApiOperation({ 
+    summary: '중복 표시 초기화', 
+    description: '모든 중복 표시를 해제합니다. 재감지 전에 사용합니다.' 
+  })
+  async resetDuplicates(@Session() session: any) {
+    if (!session.userId) {
+      return { success: false, message: 'Not logged in' };
+    }
+
+    try {
+      const reset = await this.emailAnalysisService.resetDuplicates(session.userId);
+      return { success: true, reset };
+    } catch (err) {
+      return { success: false, message: err.message };
+    }
   }
 }
