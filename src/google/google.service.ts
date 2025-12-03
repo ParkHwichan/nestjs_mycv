@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { AuthService } from '../auth/auth.service';
 import { Email } from './entities/email.entity';
 import { EmailAttachment } from './entities/email-attachment.entity';
+import { MailAccount } from '../mail/entities/mail-account.entity';
 
 @Injectable()
 export class GoogleService {
@@ -13,6 +14,8 @@ export class GoogleService {
     private emailRepo: Repository<Email>,
     @InjectRepository(EmailAttachment)
     private attachmentRepo: Repository<EmailAttachment>,
+    @InjectRepository(MailAccount)
+    private mailAccountRepo: Repository<MailAccount>,
   ) {
     console.log('[GoogleService] Initialized (Gmail Sync)');
   }
@@ -21,7 +24,7 @@ export class GoogleService {
    * 유효한 Access Token 가져오기
    */
   private async getValidAccessToken(userId: number): Promise<string> {
-    return this.authService.getValidAccessToken(userId);
+    return this.authService.getValidMailAccessToken('google', userId);
   }
 
   /**
@@ -33,6 +36,7 @@ export class GoogleService {
   }): Promise<{ synced: number; skipped: number }> {
     console.log(`[Gmail Sync] Starting for user ${userId}...`);
     
+    let isFirstSync = false;
     const accessToken = await this.getValidAccessToken(userId);
     
     // DB에서 가장 최근 이메일 날짜 조회 → after 쿼리 생성
@@ -40,7 +44,7 @@ export class GoogleService {
       where: { userId },
       order: { receivedAt: 'DESC' },
       select: ['receivedAt'],
-    });
+    }); 
 
     let query = options?.q || '';
     if (lastEmail?.receivedAt) {
@@ -50,6 +54,7 @@ export class GoogleService {
       console.log(`[Gmail Sync] Using after filter: ${new Date(afterTimestamp * 1000).toISOString()}`);
     } else {
       // 최초 동기화: 최근 3개월로 제한
+      isFirstSync = true;
       const threeMonthsAgo = new Date();
       threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
       const afterTimestamp = Math.floor(threeMonthsAgo.getTime() / 1000);
@@ -57,30 +62,54 @@ export class GoogleService {
       console.log(`[Gmail Sync] First sync - limiting to last 3 months: ${threeMonthsAgo.toISOString()}`);
     }
     
-    // 1. Gmail에서 메일 목록 가져오기
-    const messageList = await this.fetchGmailMessageList(accessToken, { 
-      ...options, 
-      q: query || undefined 
-    });
-    
-    if (!messageList.messages || messageList.messages.length === 0) {
-      console.log('[Gmail Sync] No messages found');
+    // 1. Gmail에서 메일 목록 가져오기 (최초 동기화 시 전체 페이지 순회)
+    const requestedPageSize = options?.maxResults ?? (isFirstSync ? 500 : 50);
+    const pageSize = Math.min(requestedPageSize, 500);
+    const allMessages: any[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const messageList = await this.fetchGmailMessageList(accessToken, {
+        maxResults: pageSize,
+        q: query || undefined,
+        pageToken,
+      });
+
+      if (!messageList.messages || messageList.messages.length === 0) {
+        if (allMessages.length === 0) {
+          console.log('[Gmail Sync] No messages found');
+        }
+        break;
+      }
+
+      allMessages.push(...messageList.messages);
+
+      if (isFirstSync && messageList.nextPageToken) {
+        pageToken = messageList.nextPageToken;
+        console.log(`[Gmail Sync] First sync pagination - collected ${allMessages.length} messages so far`);
+      } else {
+        pageToken = undefined;
+      }
+    } while (isFirstSync && pageToken);
+
+    if (allMessages.length === 0) {
       return { synced: 0, skipped: 0 };
     }
 
-    console.log(`[Gmail Sync] Found ${messageList.messages.length} messages`);
+    console.log(`[Gmail Sync] Found ${allMessages.length} messages`);
 
     // 2. DB에 이미 있는 메일 ID 조회
-    const existingIds = await this.getExistingMessageIds(userId, 
-      messageList.messages.map((m: any) => m.id)
+    const existingIds = await this.getExistingMessageIds(
+      userId,
+      allMessages.map((m: any) => m.id),
     );
     
     // 3. 새 메일만 필터링
-    const newMessages = messageList.messages.filter(
+    const newMessages = allMessages.filter(
       (m: any) => !existingIds.has(m.id)
     );
 
-    console.log(`[Gmail Sync] New messages: ${newMessages.length}, Skipped: ${messageList.messages.length - newMessages.length}`);
+    console.log(`[Gmail Sync] New messages: ${newMessages.length}, Skipped: ${allMessages.length - newMessages.length}`);
 
     // 4. 새 메일 상세 조회 및 저장
     let syncedCount = 0;
@@ -94,9 +123,9 @@ export class GoogleService {
     }
 
     console.log(`[Gmail Sync] Completed. Synced: ${syncedCount}`);
-    return { 
-      synced: syncedCount, 
-      skipped: messageList.messages.length - newMessages.length 
+    return {
+      synced: syncedCount,
+      skipped: allMessages.length - newMessages.length,
     };
   }
 
@@ -106,10 +135,12 @@ export class GoogleService {
   private async fetchGmailMessageList(accessToken: string, options?: {
     maxResults?: number;
     q?: string;
+    pageToken?: string;
   }): Promise<any> {
     const params = new URLSearchParams();
     params.append('maxResults', (options?.maxResults || 50).toString());
     if (options?.q) params.append('q', options.q);
+    if (options?.pageToken) params.append('pageToken', options.pageToken);
 
     const response = await fetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages?${params.toString()}`,
@@ -413,14 +444,25 @@ export class GoogleService {
   async syncAllUsers(): Promise<void> {
     console.log('[Gmail Sync] Starting sync for all users...');
     
-    // Google 토큰이 있는 모든 사용자 조회
-    const users = await this.authService.getAllUsersWithGoogleToken();
-    
-    for (const user of users) {
+    // 활성화된 Gmail 메일 계정 기준 사용자 조회
+    const gmailAccounts = await this.mailAccountRepo.find({
+      where: { provider: 'gmail', isActive: true, needsReauth: false },
+      select: ['userId'],
+    });
+
+    const uniqueUserIds = [...new Set(gmailAccounts.map(acc => acc.userId))];
+    console.log(`[Gmail Sync] Found ${uniqueUserIds.length} Gmail users (${gmailAccounts.length} active accounts)`);
+
+    if (uniqueUserIds.length === 0) {
+      console.log('[Gmail Sync] No Gmail accounts available for syncing');
+      return;
+    }
+
+    for (const userId of uniqueUserIds) {
       try {
-        await this.syncUserEmails(user.id, { maxResults: 100 });
+        await this.syncUserEmails(userId, { maxResults: 100 });
       } catch (err) {
-        console.error(`[Gmail Sync] Failed for user ${user.id}:`, err.message);
+        console.error(`[Gmail Sync] Failed for user ${userId}:`, err.message);
       }
     }
 

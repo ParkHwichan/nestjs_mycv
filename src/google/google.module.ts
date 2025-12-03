@@ -6,11 +6,12 @@ import { GoogleScheduler } from './google.scheduler';
 import { AuthModule } from '../auth/auth.module';
 import { Email } from './entities/email.entity';
 import { EmailAttachment } from './entities/email-attachment.entity';
+import { MailAccount } from '../mail/entities/mail-account.entity';
 
 @Module({
   imports: [
     AuthModule,
-    TypeOrmModule.forFeature([Email, EmailAttachment]),
+    TypeOrmModule.forFeature([Email, EmailAttachment, MailAccount]),
   ],
   controllers: [GoogleController],
   providers: [GoogleService, GoogleScheduler],
