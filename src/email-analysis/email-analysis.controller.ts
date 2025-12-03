@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Delete, Param, Query, Session } from '@nestjs/common';
+import { Controller, Get, Post, Delete, Param, Query, Session, Header } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery, ApiParam, ApiResponse } from '@nestjs/swagger';
 import { EmailAnalysisService } from './email-analysis.service';
 import { EmailAnalysisScheduler } from './email-analysis.scheduler';
@@ -90,6 +90,7 @@ export class EmailAnalysisController {
   @ApiQuery({ name: 'startDate', required: false, description: '시작일 (YYYY-MM-DD)' })
   @ApiQuery({ name: 'endDate', required: false, description: '종료일 (YYYY-MM-DD)' })
   @ApiResponse({ status: 200, description: '성공', type: PaymentReportListResponseDto })
+  @Header('Content-Type', 'application/json; charset=utf-8')
   async getPaymentReports(
     @Session() session: any,
     @Query('page') page?: string,

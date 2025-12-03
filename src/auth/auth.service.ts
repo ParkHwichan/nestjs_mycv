@@ -1,280 +1,213 @@
-import { Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+// auth/auth.service.ts
+import { Inject, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { GoogleToken } from '../google/google-token.entity';
+import { In, Repository } from 'typeorm';
+
 import { User } from '../users/users.entity';
+import {
+  OAuthProvider,
+  OAuthProviderName,
+  OAuthTokens,
+  OAuthUserInfo,
+} from './interfaces/oauth.provider';
+import { MailAccount, MailProvider } from '../mail/entities/mail-account.entity';
 
-interface GoogleTokens {
-  access_token: string;
-  refresh_token?: string;
-  expires_in: number;
-  token_type: string;
-  scope: string;
-  id_token?: string;
-}
-
-interface GoogleUserInfo {
-  id: string;
-  email: string;
-  name?: string;
-  picture?: string;
-}
+export const OAUTH_PROVIDERS = 'OAUTH_PROVIDERS';
 
 @Injectable()
 export class AuthService {
-  private readonly clientId: string;
-  private readonly clientSecret: string;
-  private readonly redirectUri: string;
-  private readonly scopes = [
-    'https://www.googleapis.com/auth/gmail.readonly',
-    'https://www.googleapis.com/auth/userinfo.email',
-    'https://www.googleapis.com/auth/userinfo.profile',
-  ];
+  private readonly providerMap = new Map<OAuthProviderName, OAuthProvider>();
+  private readonly defaultOAuthProvider: OAuthProviderName = 'google';
+  private readonly mailProvider: MailProvider = 'gmail';
 
   constructor(
-    private configService: ConfigService,
-    @InjectRepository(GoogleToken)
-    private googleTokenRepo: Repository<GoogleToken>,
     @InjectRepository(User)
-    private userRepo: Repository<User>,
+    private readonly userRepo: Repository<User>,
+    @InjectRepository(MailAccount)
+    private readonly mailAccountRepo: Repository<MailAccount>,
+    @Inject(OAUTH_PROVIDERS) providers: OAuthProvider[],
   ) {
-    this.clientId = this.configService.get<string>('GOOGLE_CLIENT_ID') || '';
-    this.clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET') || '';
-    this.redirectUri = this.configService.get<string>('GOOGLE_REDIRECT_URI') || 'http://localhost:3000/auth/google/callback';
-
-    console.log('[AuthService] Initialized');
-    console.log('  Client ID:', this.clientId?.substring(0, 20) + '...');
-    console.log('  Redirect URI:', this.redirectUri);
+    providers.forEach((p) => this.providerMap.set(p.name, p));
   }
 
-  /**
-   * Google 인증 URL 생성
-   */
-  getAuthorizationUrl(state?: string): string {
-    const params = new URLSearchParams({
-      client_id: this.clientId,
-      redirect_uri: this.redirectUri,
-      response_type: 'code',
-      scope: this.scopes.join(' '),
-      access_type: 'offline',
-      prompt: 'consent',
-      include_granted_scopes: 'true',
-    });
-
-    if (state) {
-      params.append('state', state);
+  private getProvider(name: OAuthProviderName): OAuthProvider {
+    const provider = this.providerMap.get(name);
+    if (!provider) {
+      throw new Error(`Unsupported provider: ${name}`);
     }
-
-    return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+    return provider;
   }
 
-  /**
-   * Authorization Code → Token 교환
-   */
-  async exchangeCodeForTokens(code: string): Promise<GoogleTokens> {
-    const tokenEndpoint = 'https://oauth2.googleapis.com/token';
-
-    const params = new URLSearchParams({
-      code,
-      client_id: this.clientId,
-      client_secret: this.clientSecret,
-      redirect_uri: this.redirectUri,
-      grant_type: 'authorization_code',
-    });
-
-    const response = await fetch(tokenEndpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: params.toString(),
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      console.error('[AuthService] Token exchange failed:', data);
-      throw new Error(data.error_description || data.error || 'Token exchange failed');
-    }
-
-    return data as GoogleTokens;
+  // =========================================================
+  // 1) Authorization URL
+  // =========================================================
+  getAuthorizationUrl(providerName: OAuthProviderName, state?: string): string {
+    const provider = this.getProvider(providerName);
+    return provider.getAuthorizationUrl(state);
   }
 
-  /**
-   * Google 사용자 정보 조회
-   */
-  async getGoogleUserInfo(accessToken: string): Promise<GoogleUserInfo> {
-    const response = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+  // =========================================================
+  // 2) 공통 OAuth 콜백 처리
+  //    - code -> tokens -> userInfo -> User upsert -> MailAccount upsert(optional)
+  // =========================================================
+  async handleOAuthCallback(
+    providerName: OAuthProviderName,
+    code: string,
+  ): Promise<{ user: User; mailAccount?: MailAccount }> {
+    const provider = this.getProvider(providerName);
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new Error(error.error?.message || `Failed to get user info (${response.status})`);
-    }
+    const tokens: OAuthTokens = await provider.exchangeCodeForTokens(code);
+    const userInfo: OAuthUserInfo = await provider.getUserInfo(tokens);
 
-    return response.json();
-  }
-
-  /**
-   * Google 로그인 처리 - 사용자 생성/업데이트 + 토큰 저장
-   */
-  async handleGoogleLogin(tokens: GoogleTokens, userInfo: GoogleUserInfo): Promise<User> {
-    // 1. 기존 사용자 찾기 (googleId 또는 email로)
     let user = await this.userRepo.findOne({
       where: [
-        { googleId: userInfo.id },
         { email: userInfo.email },
+        // 필요하면 provider별 id 컬럼을 User에 추가해서 같이 조회
+        // { googleId: userInfo.provider === 'google' ? userInfo.providerUserId : undefined },
       ],
-      relations: ['googleToken'],
     });
 
     if (user) {
-      // 기존 사용자 업데이트
-      user.googleId = userInfo.id;
+      // 기존 유저 업데이트
       user.name = userInfo.name || user.name;
       user.picture = userInfo.picture || user.picture;
-      user.provider = 'google';
+      user.provider = providerName;
+      // provider별 id를 User에 박고 싶으면 여기서 처리
+      if (providerName === 'google') {
+        (user as any).googleId = userInfo.providerUserId;
+      }
       await this.userRepo.save(user);
       console.log('[AuthService] User updated:', user.email);
     } else {
-      // 새 사용자 생성
+      // 신규 생성
       user = this.userRepo.create({
         email: userInfo.email,
         name: userInfo.name || '',
         picture: userInfo.picture || '',
-        googleId: userInfo.id,
-        provider: 'google',
-      });
+        provider: providerName,
+        ...(providerName === 'google'
+          ? { googleId: userInfo.providerUserId }
+          : {}),
+      } as User);
       await this.userRepo.save(user);
       console.log('[AuthService] User created:', user.email);
     }
 
-    // 2. 토큰 저장/업데이트
-    let googleToken = await this.googleTokenRepo.findOne({
-      where: { userId: user.id },
-    });
-
-    if (googleToken) {
-      // 기존 토큰 업데이트
-      googleToken.accessToken = tokens.access_token;
-      if (tokens.refresh_token) {
-        googleToken.refreshToken = tokens.refresh_token;
-      }
-      googleToken.expiresAt = Date.now() + (tokens.expires_in * 1000);
-      googleToken.scope = tokens.scope;
-      googleToken.email = userInfo.email;
-      googleToken.name = userInfo.name || '';
-      googleToken.picture = userInfo.picture || '';
-    } else {
-      // 새 토큰 생성
-      googleToken = this.googleTokenRepo.create({
-        googleId: userInfo.id,
-        email: userInfo.email,
-        name: userInfo.name || '',
-        picture: userInfo.picture || '',
-        accessToken: tokens.access_token,
-        refreshToken: tokens.refresh_token || '',
-        expiresAt: Date.now() + (tokens.expires_in * 1000),
-        scope: tokens.scope,
-        userId: user.id,
-      });
+    let mailAccount: MailAccount | undefined;
+    if (provider.upsertMailAccount) {
+      mailAccount = (await provider.upsertMailAccount(user, tokens, userInfo)) as MailAccount;
+      console.log(
+        '[AuthService] Mail account saved for user:',
+        user.id,
+        '- provider:',
+        providerName,
+      );
     }
 
-    await this.googleTokenRepo.save(googleToken);
-    console.log('[AuthService] Token saved for user:', user.id);
-    console.log('  - Refresh Token:', tokens.refresh_token ? 'YES' : 'NO');
-
-    return user;
+    return { user, mailAccount };
   }
 
-  /**
-   * 사용자 조회 (with token)
-   */
+  // =========================================================
+  // 3) 사용자 조회
+  // =========================================================
   async getUserById(userId: number): Promise<User | null> {
     return this.userRepo.findOne({
       where: { id: userId },
-      relations: ['googleToken'],
+      relations: ['mailAccounts'],
     });
   }
 
-  /**
-   * Refresh Token으로 Access Token 갱신
-   */
-  async refreshAccessToken(userId: number): Promise<GoogleToken> {
-    const googleToken = await this.googleTokenRepo.findOne({
-      where: { userId },
-    });
-
-    if (!googleToken?.refreshToken) {
-      throw new Error('No refresh token available');
-    }
-
-    const params = new URLSearchParams({
-      refresh_token: googleToken.refreshToken,
-      client_id: this.clientId,
-      client_secret: this.clientSecret,
-      grant_type: 'refresh_token',
-    });
-
-    const response = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: params.toString(),
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error_description || 'Token refresh failed');
-    }
-
-    // 새 토큰 저장
-    googleToken.accessToken = data.access_token;
-    googleToken.expiresAt = Date.now() + (data.expires_in * 1000);
-    await this.googleTokenRepo.save(googleToken);
-
-    console.log('[AuthService] Token refreshed for user:', userId);
-    return googleToken;
-  }
+  // =========================================================
+  // 4) Mail 관련 헬퍼 (gmail/outlook에서만 동작)
+  // =========================================================
 
   /**
-   * 유효한 Access Token 가져오기 (만료시 자동 갱신)
+   * Gmail용 유효 토큰 반환 (만료 시 자동 리프레시)
    */
   async getValidAccessToken(userId: number): Promise<string> {
-    const token = await this.googleTokenRepo.findOne({ where: { userId } });
-    
-    if (!token) {
-      throw new Error('No token found');
-    }
-
-    // 토큰이 만료되었으면 갱신
-    if (Date.now() > Number(token.expiresAt)) {
-      console.log('[Auth] Token expired, refreshing...');
-      const refreshed = await this.refreshAccessToken(userId);
-      return refreshed.accessToken;
-    }
-
-    return token.accessToken;
+    return this.getValidMailAccessToken(this.defaultOAuthProvider, userId);
   }
 
   /**
-   * Google 토큰이 있는 모든 사용자 조회 (크론용)
+   * 단일 사용자 토큰 리프레시 후 MailAccount 반환
    */
-  async getAllUsersWithGoogleToken(): Promise<{ id: number; email: string }[]> {
-    const tokens = await this.googleTokenRepo.find({
-      where: {},
+  async refreshAccessToken(userId: number): Promise<MailAccount> {
+    await this.getValidMailAccessToken(this.defaultOAuthProvider, userId);
+
+    const account = await this.mailAccountRepo.findOne({
+      where: { userId, provider: this.mailProvider, isActive: true },
+    });
+
+    if (!account) {
+      throw new Error('No active mail account found for user');
+    }
+
+    return account;
+  }
+
+  /**
+   * Dev/cron용 전체 토큰 리프레시
+   */
+  async refreshAllTokens(): Promise<{ success: number; failed: number }> {
+    return this.refreshAllMailTokens(this.defaultOAuthProvider);
+  }
+
+  /**
+   * 현재 사용자 토큰 상태 확인
+   */
+  async checkTokenValidity(userId: number) {
+    return this.checkMailTokenValidity(this.defaultOAuthProvider, userId);
+  }
+
+  /**
+   * Gmail 토큰을 가진 사용자 목록 조회
+   */
+  async getAllUsersWithGmailAccount(): Promise<User[]> {
+    const accounts = await this.mailAccountRepo.find({
+      where: { provider: this.mailProvider, isActive: true },
       select: ['userId'],
     });
 
-    const userIds = tokens.map(t => t.userId);
+    const userIds = [...new Set(accounts.map((a) => a.userId))];
     if (userIds.length === 0) return [];
 
-    const users = await this.userRepo.find({
-      where: userIds.map(id => ({ id })),
-      select: ['id', 'email'],
-    });
+    return this.userRepo.findBy({ id: In(userIds) });
+  }
 
-    return users;
+  async getValidMailAccessToken(
+    providerName: OAuthProviderName,
+    userId: number,
+  ): Promise<string> {
+    const provider = this.getProvider(providerName);
+    if (!provider.getValidMailAccessToken) {
+      throw new Error(`Provider ${providerName} does not support mail access token`);
+    }
+    return provider.getValidMailAccessToken(userId);
+  }
+
+  async refreshAllMailTokens(
+    providerName: OAuthProviderName,
+  ): Promise<{ success: number; failed: number }> {
+    const provider = this.getProvider(providerName);
+    if (!provider.refreshAllMailTokens) {
+      throw new Error(`Provider ${providerName} does not support mail token refresh`);
+    }
+    return provider.refreshAllMailTokens();
+  }
+
+  async checkMailTokenValidity(
+    providerName: OAuthProviderName,
+    userId: number,
+  ): Promise<{
+    hasToken: boolean;
+    hasRefreshToken: boolean;
+    isExpired: boolean;
+    needsReauth: boolean;
+  }> {
+    const provider = this.getProvider(providerName);
+    if (!provider.checkMailTokenValidity) {
+      throw new Error(`Provider ${providerName} does not support mail token validity check`);
+    }
+    return provider.checkMailTokenValidity(userId);
   }
 }
-

@@ -14,6 +14,8 @@ import { GoogleToken } from './google/google-token.entity';
 import { Email } from './google/entities/email.entity';
 import { EmailAttachment } from './google/entities/email-attachment.entity';
 import { PaymentReport } from './google/entities/payment-report.entity';
+import { MailAccount } from './mail/entities/mail-account.entity';
+import { OAuthIdentity } from './auth/oauth_identities.entity';
 import { AuthModule } from './auth/auth.module';
 import { GoogleModule } from './google/google.module';
 import { OpenaiModule } from './openai/openai.module';
@@ -42,7 +44,7 @@ import { EmailAnalysisModule } from './email-analysis/email-analysis.module';
         username: configService.get('DB_USERNAME', 'postgres'),
         password: configService.get('DB_PASSWORD', ''),
         database: configService.get('DB_DATABASE', 'mycv'),
-        entities: [User, Report, GoogleToken, Email, EmailAttachment, PaymentReport],
+        entities: [User, Report, GoogleToken, Email, EmailAttachment, PaymentReport, MailAccount, OAuthIdentity],
         synchronize: configService.get('NODE_ENV') !== 'production',
         extra: {
           client_encoding: 'UTF8',

@@ -9,9 +9,19 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
   
+  // CORS 설정 추가
+  app.enableCors({
+    origin: (origin : any, callback : any) => {
+      callback(null, true);  // 어떤 Origin이 와도 허용
+    },
+    credentials: true,
+  });
+
   app.use(
     cookieSession({
       keys: [configService.get('SESSION_SECRET', 'default-secret-change-me')],
+      secure: false, // 개발 환경에서는 HTTPS 아니어도 가능
+      httpOnly: true, // 쿠키를 HTTP 전용으로 설정
     })
   );
 

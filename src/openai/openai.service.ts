@@ -2,6 +2,27 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 
+
+const PAYMENT_KEYWORDS = [
+  '결제',
+  '구매',
+  '청구',
+  '영수증',
+  '결제 내역',
+  '결제 완료',
+  '주문',
+  'receipt',
+  'invoice',
+  'payment',
+  'purchase',
+  'order'
+];
+
+const BLACK_LIST_KEYWORDS = [
+  '광고',
+];
+
+
 export interface PaymentInfo {
   isPayment: boolean; // 결제 관련 이메일인지
   amount?: number; // 결제 금액
@@ -41,6 +62,17 @@ export class OpenaiService {
     htmlBody?: string;
     files?: FileData[]; // 이미지 + PDF 파일들
   }): Promise<PaymentInfo> {
+    const isPayment = PAYMENT_KEYWORDS.some(keyword => email.subject.toLowerCase().includes(keyword) || false );
+    const isBlackList = BLACK_LIST_KEYWORDS.some(keyword => email.subject.toLowerCase().includes(keyword) || false );
+    
+    if(!isPayment || isBlackList) {
+      return {
+        isPayment: false,
+        summary: '결제 관련 이메일이 아님',
+      };
+    }
+
+
     const systemPrompt = `당신은 이메일 분석 전문가입니다. 결제/구매/청구 관련 이메일을 정확히 식별하고 정보를 추출합니다.
 이메일 본문, 첨부된 이미지(영수증, 결제 내역 스크린샷), PDF 파일(청구서, 영수증)을 모두 분석해서 결제 정보를 추출하세요.
 반드시 유효한 JSON 형식으로만 응답하세요.`;
@@ -77,7 +109,7 @@ ${extractedHtml.substring(0, 2000)}` : ''}
 
 다음 JSON 형식으로 응답해주세요:
 {
-  "isPayment": true/false,  // 결제/구매/청구 관련 이메일인지
+  "isPayment": true/false,  // 결제/구매/청구 관련 이메일인지/ 결제 완료에 관한 이메일만 true로 설정 / 구매 가능 혹은 주문 가능에 관한 이메일은 false로 설정
   "amount": 숫자 또는 null,  // 결제 금액 (숫자만, 통화 기호 제외)
   "currency": "KRW/USD/EUR/JPY 등 또는 null",  // 통화 코드 (ISO 4217)
   "merchant": "문자열 또는 null",  // 결제처/가맹점/서비스명

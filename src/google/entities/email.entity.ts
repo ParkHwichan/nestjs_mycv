@@ -12,13 +12,15 @@ import {
 import { User } from '../../users/users.entity';
 import { EmailAttachment } from './email-attachment.entity';
 import { PaymentReport } from './payment-report.entity';
+import { MailAccount } from '../../mail/entities/mail-account.entity';
 
 @Entity('emails')
-@Index(['userId', 'messageId'], { unique: true }) // 사용자별 메일 중복 방지
+@Index(['mailAccountId', 'messageId'], { unique: true }) // 계정별 메일 중복 방지
 export class Email {
   @PrimaryGeneratedColumn()
   id: number;
 
+  // ==================== 기존 userId (마이그레이션 호환용) ====================
   @Column()
   @Index()
   userId: number;
@@ -27,9 +29,18 @@ export class Email {
   @JoinColumn({ name: 'userId' })
   user: User;
 
+  // ==================== 새로운 메일 계정 연결 ====================
+  @Column({ nullable: true })  // 마이그레이션 기간 동안 nullable
+  @Index()
+  mailAccountId: number;
+
+  @ManyToOne(() => MailAccount, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'mailAccountId' })
+  mailAccount: MailAccount;
+
   @Column()
   @Index()
-  messageId: string; // Gmail message ID
+  messageId: string; // Gmail/Yahoo/etc message ID
 
   @Column()
   threadId: string;

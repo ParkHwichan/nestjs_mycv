@@ -1,6 +1,8 @@
-import { AfterInsert, AfterUpdate, AfterRemove, Entity, Column, PrimaryGeneratedColumn, OneToOne } from 'typeorm';
+import { AfterInsert, AfterUpdate, AfterRemove, Entity, Column, PrimaryGeneratedColumn, OneToOne, OneToMany } from 'typeorm';
 import { Exclude } from 'class-transformer';
 import { GoogleToken } from '../google/google-token.entity';
+import { MailAccount } from '../mail/entities/mail-account.entity';
+import { OAuthIdentity } from 'src/auth/oauth_identities.entity';
 
 @Entity()
 export class User {
@@ -9,6 +11,9 @@ export class User {
 
     @Column({ unique: true })
     email: string;
+
+    @OneToOne(() => OAuthIdentity, (oauthIdentity) => oauthIdentity.user)
+    oauthIdentity?: OAuthIdentity;
 
     @Column({ nullable: true })
     @Exclude()
@@ -26,8 +31,16 @@ export class User {
     @Column({ nullable: true })
     googleId: string;
 
+    @Column({ default: false })
+    needsReauth: boolean;  // Google 재인증 필요 여부
+
+    // ==================== 기존 (deprecated, 마이그레이션 후 삭제) ====================
     @OneToOne(() => GoogleToken, (token) => token.user)
     googleToken: GoogleToken;
+
+    // ==================== 새로운 다중 메일 계정 ====================
+    @OneToMany(() => MailAccount, (account) => account.user)
+    mailAccounts: MailAccount[];
 
     @AfterInsert()
     logInsert() {

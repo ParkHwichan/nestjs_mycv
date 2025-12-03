@@ -33,7 +33,7 @@ export class EmailAnalysisScheduler {
   /**
    * [Producer] 5분마다 미분석 이메일을 큐에 추가
    */
-  @Cron(CronExpression.EVERY_10_SECONDS)
+  @Cron(CronExpression.EVERY_30_SECONDS)
   async enqueueUnanalyzedEmails() {
     if (this.isEnqueuing) {
       console.log('[Queue Producer] Already enqueuing, skipping...');

@@ -1,20 +1,26 @@
-import { Controller, Get, Query, Res, Session } from '@nestjs/common';
+import { Controller, Get, Post, Query, Res, Session } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery, ApiExcludeEndpoint } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { AuthService } from './auth.service';
+import { AuthScheduler } from './auth.scheduler';
 
 @ApiTags('auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private authService: AuthService) {}
+  constructor(
+    private authService: AuthService,
+    private authScheduler: AuthScheduler,
+  ) {}
 
   @Get('google')
-  @ApiOperation({ summary: 'Google 로그인', description: 'Google OAuth 로그인 페이지로 리다이렉트' })
+  @ApiOperation({ summary: 'Google login', description: 'Redirect to Google OAuth login page' })
   async googleLogin(@Res() res: Response) {
-    const authUrl = this.authService.getAuthorizationUrl();
-    console.log('\n[Auth] Google 로그인 시작');
+    const authUrl = this.authService.getAuthorizationUrl('google');
+    console.log('\n[Auth] Google login start');
     res.redirect(authUrl);
   }
+
+
 
   @Get('google/callback')
   @ApiExcludeEndpoint()
@@ -36,15 +42,7 @@ export class AuthController {
     }
 
     try {
-      const tokens = await this.authService.exchangeCodeForTokens(code);
-      console.log('[Auth] Token exchange success');
-
-      const userInfo = await this.authService.getGoogleUserInfo(tokens.access_token);
-      console.log('[Auth] User info:', userInfo.email);
-
-      const user = await this.authService.handleGoogleLogin(tokens, userInfo);
-      console.log('[Auth] User saved to DB:', user.id);
-
+      const { user, mailAccount } = await this.authService.handleOAuthCallback('google', code);
       session.userId = user.id;
       session.user = {
         id: user.id,
@@ -62,7 +60,7 @@ export class AuthController {
   }
 
   @Get('me')
-  @ApiOperation({ summary: '현재 사용자 정보', description: '로그인한 사용자의 정보와 토큰 상태 조회' })
+  @ApiOperation({ summary: 'Current user info', description: 'Return current session user profile and token status' })
   async me(@Session() session: any) {
     if (!session.userId) {
       return { logged_in: false };
@@ -73,11 +71,12 @@ export class AuthController {
       return { logged_in: false };
     }
 
-    const token = user.googleToken;
-    const isExpired = token ? Date.now() > token.expiresAt : true;
+    const mailAccount = user.mailAccounts?.find((acc) => acc.provider === 'gmail');
+    const isExpired = mailAccount?.expiresAt ? Date.now() > Number(mailAccount.expiresAt) : !mailAccount;
 
     return {
       logged_in: true,
+      needs_reauth: user.needsReauth,
       user: {
         id: user.id,
         email: user.email,
@@ -86,34 +85,18 @@ export class AuthController {
         provider: user.provider,
       },
       token_status: {
-        has_refresh_token: !!token?.refreshToken,
+        has_refresh_token: !!mailAccount?.refreshToken,
         is_expired: isExpired,
-        expires_at: token?.expiresAt ? new Date(Number(token.expiresAt)).toISOString() : null,
+        expires_at: mailAccount?.expiresAt ? new Date(Number(mailAccount.expiresAt)).toISOString() : null,
       },
+      ...(user.needsReauth && {
+        message: 'Google session expired. Please re-authenticate.',
+      }),
     };
   }
 
-  @Get('refresh')
-  @ApiOperation({ summary: '토큰 갱신', description: 'Google OAuth 액세스 토큰 갱신' })
-  async refresh(@Session() session: any) {
-    if (!session.userId) {
-      return { success: false, message: 'Not logged in' };
-    }
-
-    try {
-      const token = await this.authService.refreshAccessToken(session.userId);
-      return {
-        success: true,
-        message: 'Token refreshed',
-        expires_at: new Date(Number(token.expiresAt)).toISOString(),
-      };
-    } catch (err) {
-      return { success: false, message: err.message };
-    }
-  }
-
   @Get('logout')
-  @ApiOperation({ summary: '로그아웃', description: '세션 종료 후 홈으로 리다이렉트' })
+  @ApiOperation({ summary: 'Logout', description: 'Clear session and redirect home' })
   async logout(@Session() session: any, @Res() res: Response) {
     console.log('[Auth] Logout:', session.user?.email);
     session.userId = null;
@@ -122,25 +105,23 @@ export class AuthController {
   }
 
   @Get('dev-login')
-  @ApiOperation({ summary: '[개발용] 테스트 로그인', description: 'DB에 있는 사용자로 바로 로그인 (개발 환경 전용)' })
-  @ApiQuery({ name: 'userId', required: false, description: '로그인할 사용자 ID (생략시 첫번째 사용자)', example: 1 })
+  @ApiOperation({ summary: '[dev] Test login', description: 'Login as an existing DB user (dev only)' })
+  @ApiQuery({ name: 'userId', required: false, description: 'User ID to login (defaults to first)', example: 1 })
   async devLogin(
     @Session() session: any,
     @Query('userId') userId?: string,
   ) {
-    // 프로덕션에서는 비활성화
     if (process.env.NODE_ENV === 'production') {
       return { success: false, message: 'Not available in production' };
     }
 
     try {
       let user;
-      
+
       if (userId) {
-        user = await this.authService.getUserById(parseInt(userId));
+        user = await this.authService.getUserById(parseInt(userId, 10));
       } else {
-        // userId가 없으면 첫번째 사용자 찾기
-        const users = await this.authService.getAllUsersWithGoogleToken();
+        const users = await this.authService.getAllUsersWithGmailAccount();
         if (users.length > 0) {
           user = await this.authService.getUserById(users[0].id);
         }
@@ -150,7 +131,6 @@ export class AuthController {
         return { success: false, message: 'No user found in DB' };
       }
 
-      // 세션에 사용자 정보 저장
       session.userId = user.id;
       session.user = {
         id: user.id,
@@ -176,16 +156,56 @@ export class AuthController {
   }
 
   @Get('dev-users')
-  @ApiOperation({ summary: '[개발용] 사용자 목록', description: 'DB에 있는 사용자 목록 조회 (개발 환경 전용)' })
+  @ApiOperation({ summary: '[dev] User list', description: 'List users with Gmail tokens (dev only)' })
   async devUsers() {
-    // 프로덕션에서는 비활성화
     if (process.env.NODE_ENV === 'production') {
       return { success: false, message: 'Not available in production' };
     }
 
     try {
-      const users = await this.authService.getAllUsersWithGoogleToken();
+      const users = await this.authService.getAllUsersWithGmailAccount();
       return { success: true, users };
+    } catch (err) {
+      return { success: false, message: err.message };
+    }
+  }
+
+  @Post('refresh-all-tokens')
+  @ApiOperation({
+    summary: '[admin] Refresh all tokens',
+    description: 'Refresh Google tokens for all users; marks needsReauth on failure',
+  })
+  async refreshAllTokens(@Session() session: any) {
+    if (!session.userId) {
+      return { success: false, message: 'Not logged in' };
+    }
+
+    try {
+      const result = await this.authScheduler.triggerTokenRefresh();
+      return {
+        success: true,
+        message: 'Token refresh completed',
+        refreshed: result.success,
+        failed: result.failed,
+      };
+    } catch (err) {
+      return { success: false, message: err.message };
+    }
+  }
+
+  @Get('token-status')
+  @ApiOperation({
+    summary: 'Token status check',
+    description: 'Return token availability/expiry flags for the current user',
+  })
+  async tokenStatus(@Session() session: any) {
+    if (!session.userId) {
+      return { success: false, message: 'Not logged in' };
+    }
+
+    try {
+      const status = await this.authService.checkTokenValidity(session.userId);
+      return { success: true, ...status };
     } catch (err) {
       return { success: false, message: err.message };
     }
